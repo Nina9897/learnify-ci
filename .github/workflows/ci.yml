@@ -1,25 +1,36 @@
 name: CI Learnify
 
-# Cuándo se ejecuta: en cada push a estas ramas y en cada pull request hacia main o develop
 on:
   push:
-    branches: [main, develop, facture/pipeline]
+    branches: [main, develop, "feature/**"]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
 
 jobs:
-  # ETAPA 1: BUILD
-  build:
-    name: Build
+  # ETAPA 1: CALIDAD Y BUILD
+  calidad:
+    name: 1 - Calidad y build
     runs-on: ubuntu-latest
     steps:
       - name: Obtener código del repositorio
         uses: actions/checkout@v4
 
-      - name: Configurar entorno (Python 3.12)
+      - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements.txt
 
@@ -28,20 +39,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Análisis estático con Ruff
+        run: ruff check backend tests
+
       - name: Build - verificar que el código compila
-        run: python -m compileall -q backend
+        run: python -m compileall -q backend tests
 
       - name: Build - verificar que el servidor se puede importar
         working-directory: backend
         run: python -c "import app; print('Servidor importado correctamente')"
 
-  # ETAPA 2: PRUEBAS (solo corre si el Build fue exitoso)
-  test:
-    name: Pruebas
-    runs-on: ubuntu-latest
-    needs: build
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
-    # MongoDB temporal que GitHub enciende solo para esta etapa
+      - name: Frontend - verificar sintaxis de los archivos JavaScript
+        run: |
+          fallos=0
+          for f in frontend/js/*.js; do
+            node --check "$f" || { echo "::error file=$f::Error de sintaxis"; fallos=1; }
+          done
+          exit $fallos
+
+  # ETAPA 2: PRUEBAS (solo si la etapa 1 pasó)
+  pruebas:
+    name: 2 - Pruebas automatizadas
+    runs-on: ubuntu-latest
+    needs: calidad
+
     services:
       mongodb:
         image: mongo:7
@@ -55,56 +81,77 @@ jobs:
 
     env:
       MONGO_URI: mongodb://localhost:27017/?serverSelectionTimeoutMS=3000
+      PYTHONPATH: backend
+      COVERAGE_FILE: ${{ github.workspace }}/.coverage
 
     steps:
       - name: Obtener código del repositorio
         uses: actions/checkout@v4
 
-      - name: Configurar entorno (Python 3.12)
+      - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements.txt
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements.txt
 
-      - name: Pruebas de integración (API + MongoDB)
-        working-directory: backend
-        run: python -m pytest tests/test_integracion.py -v --junitxml=resultados-integracion.xml
+      - name: Pruebas unitarias
+        run: >
+          python -m pytest tests
+          --cov=app --cov-report=
+          --junitxml=resultados-unitarias.xml
 
-      - name: Pruebas funcionales (flujos completos)
+      - name: Pruebas de integración y funcionales (API + MongoDB)
         if: always()
         working-directory: backend
-        run: python -m pytest tests/test_funcionales.py -v --junitxml=resultados-funcionales.xml
+        run: >
+          python -m pytest tests
+          --cov=app --cov-append --cov-report=
+          --junitxml=../resultados-integracion-funcionales.xml
 
-      - name: Guardar resultados de las pruebas
+      - name: Resumen de resultados y cobertura
+        if: always()
+        run: |
+          python scripts/resumen_pruebas.py resultados-*.xml >> "$GITHUB_STEP_SUMMARY"
+          echo '### Cobertura de código (app.py)' >> "$GITHUB_STEP_SUMMARY"
+          coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY" || true
+          coverage xml -o coverage.xml || true
+
+      # Rechaza si hay pruebas fallidas u omitidas
+      - name: Verificar que no haya pruebas fallidas ni omitidas
+        if: always()
+        run: python scripts/resumen_pruebas.py --estricto resultados-*.xml > /dev/null
+
+      - name: Guardar reportes como artefactos
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resultados-pruebas
-          path: backend/resultados-*.xml
-          if-no-files-found: ignore
+          name: reportes-de-pruebas
+          path: |
+            resultados-*.xml
+            coverage.xml
+          if-no-files-found: warn
 
-  # ETAPA 3: REPORTE DE RESULTADOS (siempre se ejecuta)
-  reporte:
-    name: Reporte de resultados
+  # ETAPA 3: RESULTADO FINAL (siempre se ejecuta)
+  resultado:
+    name: Resultado del pipeline
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [calidad, pruebas]
     if: always()
     steps:
-      - name: Mostrar resumen
+      - name: Evaluar resultado
         run: |
-          echo "## Resultado del pipeline" >> $GITHUB_STEP_SUMMARY
-          echo "- Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Pruebas: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
-
-      - name: Pipeline fallido (reportar error)
-        if: needs.build.result != 'success' || needs.test.result != 'success'
-        run: |
-          echo "El pipeline falló o no pudo ejecutar las pruebas."
-          echo "Build: ${{ needs.build.result }} | Pruebas: ${{ needs.test.result }}"
-          exit 1
+          echo "## Resultado del pipeline" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Etapa 1 (Calidad y build): ${{ needs.calidad.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Etapa 2 (Pruebas): ${{ needs.pruebas.result }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.calidad.result }}" = "success" ] && [ "${{ needs.pruebas.result }}" = "success" ]; then
+            echo "PIPELINE APROBADO: el cambio puede integrarse."
+          else
+            echo "PIPELINE RECHAZADO: revisa los logs de la etapa que falló."
+            exit 1
+          fi
