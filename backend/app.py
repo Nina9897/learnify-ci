@@ -6,7 +6,6 @@
 # ============================================
 # IMPORTAR LIBRERÍAS NECESARIAS
 # ============================================
-import hashlib
 import gridfs
 import os
 import random
@@ -20,16 +19,12 @@ from functools import wraps
 from datetime import datetime, timedelta
 from email.mime.base import MIMEBase
 from email import encoders
-from io import BytesIO
 
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.utils import secure_filename
 from bson import ObjectId
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm
 
 from dotenv import load_dotenv
 from mongo_config import get_mongo_connection
@@ -1097,7 +1092,7 @@ def servir_archivo_gridfs(archivo_id):
     try:
         archivo = fs.get(ObjectId(archivo_id))
         return Response(archivo.read(), mimetype=archivo.content_type)
-    except Exception as error:
+    except Exception:
         return jsonify({"error": "Archivo no encontrado"}), 404
 
 # ============================================
@@ -1347,7 +1342,7 @@ def detectar_abandono(equipo_id):
             return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
         
         miembros_ids = equipo.get("miembros", [])
-        fecha_limite = datetime.now() - timedelta(days=7)
+        
         fecha_limite_chat = datetime.now() - timedelta(days=30)
         
         resultados = []
@@ -1582,7 +1577,7 @@ def analisis_cluster():
         tiempo_fin = time.time()
         
         inercia = kmeans.inertia_
-        centroids = kmeans.cluster_centers_.tolist()
+        
         iteraciones = kmeans.n_iter_
         
         silueta = 0
@@ -3395,7 +3390,6 @@ def buscar_maestros():
 # ============================================
 # 16. COMPARTIR DOCUMENTOS POR CORREO
 # ============================================
-import uuid
 
 @app.route('/api/compartir/crear', methods=['POST'])
 def crear_compartido():
@@ -3474,7 +3468,6 @@ def crear_compartido():
         # ============================================
 # 17. GENERAR ENLACE Y VER DOCUMENTO (PÚBLICO)
 # ============================================
-import uuid
 
 @app.route('/api/compartir/generar-enlace', methods=['POST'])
 def generar_enlace():

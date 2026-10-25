@@ -10,7 +10,6 @@
 # ============================================
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-import hashlib  # Para encriptar contraseñas
 from config import obtener_conexion  # Nuestro archivo de conexión
 import os
 from werkzeug.utils import secure_filename
@@ -991,8 +990,6 @@ def enviar_mensaje():
 # ============================================
 # API: SUBIR ARCHIVO (entrega de tarea)
 # ============================================
-import os
-from werkzeug.utils import secure_filename
 
 # Configurar carpeta de uploads
 UPLOAD_FOLDER = 'uploads'

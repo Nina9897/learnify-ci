@@ -2,11 +2,8 @@
 # MIGRAR DATOS DE MYSQL A MONGODB
 # ============================================
 
-import mysql.connector
 from mongo_config import get_mongo_connection
 from config import obtener_conexion as get_mysql_connection
-from bson import ObjectId
-from datetime import datetime as dt
 import datetime
 
 def migrar_usuarios(mapping_ids):

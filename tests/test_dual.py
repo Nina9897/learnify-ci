@@ -3,7 +3,6 @@
 # PRUEBAS UNITARIAS: Cálculo del estado de un Dual
 # ============================================
 
-import pytest
 from datetime import datetime, timedelta
 import sys
 import os
