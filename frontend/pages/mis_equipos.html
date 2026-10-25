@@ -1,0 +1,130 @@
+<!-- ============================================
+     ARCHIVO: mis_equipos.html
+     Página de gestión de equipos - Diseño profesional
+     ============================================ -->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learnify | Mis Equipos</title>
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="../css/base.css">
+    <link rel="stylesheet" href="../css/equipos.css">
+    <link rel="stylesheet" href="../css/menu.css">
+    <link rel="stylesheet" href="../css/modal_editar_perfil.css">
+    <link rel="stylesheet" href="../css/temas_oscuro.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="menu-lateral">
+    <div class="app-container">
+        
+        <!-- ============================================ -->
+        <!-- MENÚ LATERAL                                 -->
+        <!-- ============================================ -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-graduation-cap"></i><span> Learnify</span></h2>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="../dashboard.html" class="menu-item">
+                    <i class="fas fa-chart-line"></i><span> Dashboard</span>
+                </a>
+                <a href="mis_equipos.html" class="menu-item active">
+                    <i class="fas fa-users"></i><span> Mis Equipos</span>
+                </a>
+                <a href="analisis/analisis_alumnos.html" class="menu-item">
+                    <i class="fas fa-chart-pie"></i><span> Análisis</span>
+                </a>
+                <a href="duales/mis_duales.html" class="menu-item">
+                    <i class="fas fa-briefcase"></i><span> Duales</span>
+                </a>
+                <a href="estadias/mis_estadias.html" class="menu-item">
+                    <i class="fas fa-building"></i><span> Estadías</span>
+                </a>
+                
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info-sidebar" id="userInfoSidebar"></div>
+
+                <button class="btn-cerrar-sesion" onclick="cerrarSesion()">
+                    <i class="fas fa-sign-out-alt"></i><span> Cerrar sesión</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- ============================================ -->
+        <!-- CONTENIDO PRINCIPAL                          -->
+        <!-- ============================================ -->
+        <main class="main-content">
+            <div class="page-container">
+
+                <!-- Header de la página -->
+                <div class="page-header">
+                    <div class="page-header-left">
+                        <h1><i class="fas fa-users"></i> Mis Equipos</h1>
+                        <p class="page-subtitle">Gestiona tus equipos, miembros y actividades</p>
+                    </div>
+                    <div class="page-header-actions">
+                        <button id="btnMostrarUnirse" class="btn btn-outline">
+                            <i class="fas fa-user-plus"></i> Unirse a equipo
+                        </button>
+                        <button id="btnCrearEquipo" class="btn btn-primary">
+                            <i class="fas fa-plus-circle"></i> Crear equipo
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Mensajes -->
+                <div id="mensaje" class="message-container" style="display: none;">
+                    <div class="message-content" id="mensajeContent">
+                        <i class="fas fa-check-circle" id="mensajeIcon"></i>
+                        <span id="mensajeTexto"></span>
+                    </div>
+                </div>
+
+                <!-- Formulario para unirse -->
+                <div id="formUnirse" class="join-form">
+                    <div class="join-form-content">
+                        <h3><i class="fas fa-door-open"></i> Unirse a un equipo</h3>
+                        <p class="join-form-desc">Ingresa el ID del equipo que te compartió tu maestro o líder.</p>
+                        <div class="join-form-input-group">
+                            <i class="fas fa-qrcode"></i>
+                            <input type="text" id="codigoEquipo" placeholder="ID del equipo" required>
+                            <button id="btnConfirmarUnirse" class="btn btn-primary">
+                                <i class="fas fa-check"></i> Unirse
+                            </button>
+                            <button id="btnCancelarUnirse" class="btn btn-outline">
+                                <i class="fas fa-times"></i> Cancelar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Grid de equipos -->
+                <div id="equiposContainer" class="equipos-grid">
+                    <div class="loading-state">
+                        <i class="fas fa-spinner fa-pulse"></i>
+                        <p>Cargando equipos...</p>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- SCRIPTS                                       -->
+    <!-- ============================================ -->
+    <script src="../js/menu.js"></script>
+    <script src="../js/equipos.js"></script>
+</body>
+</html>

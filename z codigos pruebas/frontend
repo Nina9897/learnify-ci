@@ -1,0 +1,46 @@
+<!-- ============================================
+     ARCHIVO 9/10: PÁGINA DE REGISTRO
+     ============================================ -->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learnify | Registrarse</title>
+    <link rel="stylesheet" href="css/base.css">
+</head>
+<body>
+    <div class="contenedor">
+        <h2>📝 Crear cuenta</h2>
+        
+        <!-- Mensajes de éxito/error -->
+        <div id="mensaje" class="mensaje"></div>
+        
+        <!-- Formulario de registro -->
+        <form id="formulario-registro">
+            <input type="text" id="nombre" placeholder="Nombre completo" required>
+            <input type="email" id="email" placeholder="Correo electrónico" required>
+            <input type="password" id="password" placeholder="Contraseña" required>
+            
+            <select id="rol" required>
+                <option value="">Selecciona tu rol</option>
+                <option value="maestro">👨‍🏫 Maestro / Líder</option>
+                <option value="alumno">👨‍🎓 Alumno / Miembro</option>
+            </select>
+            
+            <button type="submit" class="btn primario btn-block">Registrarse</button>
+        </form>
+        
+        <!-- Enlaces -->
+        <div class="enlace-rapido">
+            ¿Ya tienes cuenta? <a href="iniciar-sesion.html">Inicia sesión</a>
+        </div>
+        <div class="volver">
+            <a href="bienvenida.html">← Volver al inicio</a>
+        </div>
+    </div>
+
+    <script src="js/autenticacion.js"></script>
+</body>
+</html>

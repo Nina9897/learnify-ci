@@ -1,0 +1,3826 @@
+# ============================================
+# ARCHIVO: app.py
+# SERVIDOR PRINCIPAL - LEARNIFY
+# ============================================
+
+# ============================================
+# IMPORTAR LIBRERÍAS NECESARIAS
+# ============================================
+import hashlib
+import gridfs
+import os
+import random
+import string
+import json
+import smtplib
+import uuid
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from functools import wraps
+from datetime import datetime, timedelta
+from email.mime.base import MIMEBase
+from email import encoders
+from io import BytesIO
+
+from flask import Flask, jsonify, request, send_from_directory, Response
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from werkzeug.utils import secure_filename
+from bson import ObjectId
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
+
+from dotenv import load_dotenv
+from mongo_config import get_mongo_connection
+
+
+# ============================================
+# CARGAR VARIABLES DE ENTORNO (.env)
+# ============================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
+MAIL_USER = os.getenv('MAIL_USER', '')
+MAIL_PASSWORD = os.getenv('MAIL_PASSWORD', '')
+MAIL_FROM_NAME = os.getenv('MAIL_FROM_NAME', 'Learnify')
+
+# ============================================
+# CONFIGURACIÓN DEL SERVIDOR
+# ============================================
+app = Flask(__name__, 
+            static_folder='../frontend',
+            static_url_path='')
+
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# ============================================
+# CONEXIÓN A MONGODB Y GRIDFS
+# ============================================
+db = get_mongo_connection()
+fs = gridfs.GridFS(db)
+
+# ============================================
+# SEGURIDAD: BLOQUEO POR INTENTOS FALLIDOS (VERSIÓN CORREGIDA)
+# ============================================
+
+ARCHIVO_INTENTOS = "intentos_fallidos.json"
+
+def cargar_intentos():
+    """Carga el registro de intentos fallidos desde archivo"""
+    try:
+        if os.path.exists(ARCHIVO_INTENTOS):
+            with open(ARCHIVO_INTENTOS, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def guardar_intentos(intentos):
+    """Guarda el registro de intentos fallidos en archivo"""
+    try:
+        with open(ARCHIVO_INTENTOS, 'w', encoding='utf-8') as f:
+            json.dump(intentos, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"❌ Error al guardar: {e}")
+        return False
+
+def obtener_id_cliente():
+    """Obtiene un identificador único para el cliente"""
+    ip = request.remote_addr
+    return ip
+
+def verificar_bloqueo(id_cliente):
+    """Verifica si un identificador está bloqueado y devuelve segundos restantes"""
+    intentos = cargar_intentos()
+    
+    if id_cliente in intentos:
+        data = intentos[id_cliente]
+        if 'bloqueo_hasta' in data and data['bloqueo_hasta']:
+            try:
+                bloqueo_hasta = datetime.fromisoformat(data['bloqueo_hasta'])
+                ahora = datetime.now()
+                if ahora < bloqueo_hasta:
+                    segundos = int((bloqueo_hasta - ahora).total_seconds())
+                    if segundos < 1:
+                        segundos = 1
+                    minutos = int(segundos / 60)
+                    if minutos < 1:
+                        minutos = 1
+                    return True, minutos, segundos
+            except:
+                pass
+    return False, 0, 0
+
+def registrar_intento_fallido(id_cliente):
+    """Registra un intento fallido para un identificador"""
+    intentos = cargar_intentos()
+    ahora = datetime.now()
+    
+    if id_cliente not in intentos:
+        intentos[id_cliente] = {
+            "intentos": 0,
+            "primer_intento": ahora.isoformat(),
+            "ultimo_intento": ahora.isoformat(),
+            "bloqueo_hasta": None
+        }
+    
+    intentos[id_cliente]["intentos"] += 1
+    intentos[id_cliente]["ultimo_intento"] = ahora.isoformat()
+    
+    intentos_fallidos = intentos[id_cliente]["intentos"]
+    
+    if intentos_fallidos >= 3:
+        primer_intento = datetime.fromisoformat(intentos[id_cliente]["primer_intento"])
+        intentos[id_cliente]["bloqueo_hasta"] = (primer_intento + timedelta(minutes=5)).isoformat()
+        print(f"🔒 BLOQUEADO: {id_cliente} hasta {intentos[id_cliente]['bloqueo_hasta']}")
+    else:
+        intentos[id_cliente]["bloqueo_hasta"] = None
+        print(f"⚠️ INTENTO {intentos_fallidos}/3: {id_cliente}")
+    
+    guardar_intentos(intentos)
+    
+    if intentos[id_cliente]["bloqueo_hasta"]:
+        bloqueo_hasta = datetime.fromisoformat(intentos[id_cliente]["bloqueo_hasta"])
+        segundos = int((bloqueo_hasta - ahora).total_seconds())
+        if segundos < 1:
+            segundos = 1
+        return {
+            "bloqueado": True,
+            "minutos_restantes": int(segundos / 60),
+            "segundos_restantes": segundos,
+            "intentos": intentos_fallidos
+        }
+    else:
+        return {
+            "bloqueado": False,
+            "intentos": intentos_fallidos
+        }
+
+def reiniciar_intentos(id_cliente):
+    """Reinicia el contador de intentos"""
+    intentos = cargar_intentos()
+    if id_cliente in intentos:
+        del intentos[id_cliente]
+        guardar_intentos(intentos)
+        print(f"🔄 Intentos reiniciados para: {id_cliente}")
+
+def obtener_info_intentos(id_cliente):
+    """Obtiene información de intentos para un identificador"""
+    intentos = cargar_intentos()
+    if id_cliente in intentos:
+        data = intentos[id_cliente]
+        bloqueado = False
+        segundos_restantes = 0
+        if data.get('bloqueo_hasta'):
+            try:
+                bloqueo_hasta = datetime.fromisoformat(data['bloqueo_hasta'])
+                ahora = datetime.now()
+                if ahora < bloqueo_hasta:
+                    bloqueado = True
+                    segundos_restantes = int((bloqueo_hasta - ahora).total_seconds())
+                    if segundos_restantes < 1:
+                        segundos_restantes = 1
+            except:
+                pass
+        return {
+            "intentos": data.get("intentos", 0),
+            "bloqueado": bloqueado,
+            "segundos_restantes": segundos_restantes
+        }
+    return {"intentos": 0, "bloqueado": False, "segundos_restantes": 0}
+
+# ============================================
+# HELPER: CONVERTIR OBJECTID
+# ============================================
+def convertir_objectid(documento):
+    if documento is None:
+        return None
+    if isinstance(documento, list):
+        return [convertir_objectid(item) for item in documento]
+    if isinstance(documento, dict):
+        nuevo_doc = {}
+        for key, value in documento.items():
+            if isinstance(value, ObjectId):
+                nuevo_doc[key] = str(value)
+            elif isinstance(value, list):
+                nuevo_doc[key] = [convertir_objectid(item) for item in value]
+            elif isinstance(value, dict):
+                nuevo_doc[key] = convertir_objectid(value)
+            else:
+                nuevo_doc[key] = value
+        return nuevo_doc
+    return documento
+
+# ============================================
+# REGISTRAR ACTIVIDAD
+# ============================================
+def registrar_actividad(usuario_id, tipo_accion, descripcion=""):
+    try:
+        if isinstance(usuario_id, str):
+            usuario_id = ObjectId(usuario_id)
+        db.actividad.insert_one({
+            "usuario_id": usuario_id,
+            "tipo": tipo_accion,
+            "descripcion": descripcion,
+            "fecha": datetime.now(),
+            "ip": request.remote_addr if request else None
+        })
+        print(f" Actividad registrada: {tipo_accion} - Usuario: {usuario_id}")
+    except Exception as e:
+        print(f" Error al registrar actividad: {e}")
+
+def registrar_actividad_decorator(tipo_accion):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            response = f(*args, **kwargs)
+            usuario_id = None
+            if 'usuario_id' in kwargs:
+                usuario_id = kwargs['usuario_id']
+            elif 'alumno_id' in kwargs:
+                usuario_id = kwargs['alumno_id']
+            if not usuario_id and request.json:
+                usuario_id = (request.json.get('usuario_id') or 
+                             request.json.get('alumno_id') or 
+                             request.json.get('creador_id') or
+                             request.json.get('lider_id'))
+            if not usuario_id:
+                usuario_id = (request.args.get('usuario_id') or 
+                             request.args.get('alumno_id'))
+            if usuario_id:
+                try:
+                    registrar_actividad(usuario_id, tipo_accion)
+                except Exception as e:
+                    print(f" Error al registrar actividad en decorador: {e}")
+            return response
+        return decorated_function
+    return decorator
+
+# ============================================
+# FUNCIÓN PARA ENVIAR CÓDIGO DE FIRMA POR EMAIL
+# ============================================
+def enviar_codigo_email(destinatario, codigo, nombre_usuario):
+    """
+    Envía el código de firma al correo del maestro.
+    Devuelve True si se envió, False si falló.
+    """
+    if not MAIL_USER or not MAIL_PASSWORD:
+        print(" No hay configuración de email. Código NO enviado.")
+        return False
+    
+    try:
+        # Crear mensaje
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = ' Código de firma - Learnify'
+        msg['From'] = f'{MAIL_FROM_NAME} <{MAIL_USER}>'
+        msg['To'] = destinatario
+        
+        # Cuerpo del mensaje (HTML bonito)
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8fafc; padding: 20px; }}
+                .container {{ max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }}
+                .logo {{ text-align: center; margin-bottom: 20px; }}
+                .logo h1 {{ color: #667eea; font-size: 24px; margin: 0; }}
+                .titulo {{ color: #1e293b; font-size: 18px; margin-bottom: 10px; }}
+                .texto {{ color: #64748b; font-size: 14px; line-height: 1.6; }}
+                .codigo {{ background: linear-gradient(135deg, #667eea, #764ba2); color: white; font-size: 32px; font-weight: 700; letter-spacing: 8px; text-align: center; padding: 20px; border-radius: 10px; margin: 20px 0; font-family: monospace; }}
+                .aviso {{ background: #fef3c7; color: #92400e; padding: 12px; border-radius: 8px; font-size: 12px; margin-top: 20px; border-left: 4px solid #f59e0b; }}
+                .footer {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #f1f5f9; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="logo">
+                    <h1> Learnify</h1>
+                </div>
+                <h2 class="titulo">Hola {nombre_usuario},</h2>
+                <p class="texto">
+                    Recibimos una solicitud para firmar un programa dual. Usa el siguiente código para completar tu firma:
+                </p>
+                <div class="codigo">{codigo}</div>
+                <p class="texto">
+                    Este código es válido por <strong>10 minutos</strong> y solo puede usarse una vez.
+                </p>
+                <div class="aviso">
+                    <strong>Si no fuiste tú</strong>, ignora este mensaje. Alguien pudo haber intentado firmar en tu nombre.
+                </div>
+                <div class="footer">
+                    <p>Documento generado por <strong>Learnify</strong></p>
+                    <p>Este es un mensaje automático, no responder.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        parte_html = MIMEText(html, 'html', 'utf-8')
+        msg.attach(parte_html)
+        
+        # Conectar al servidor SMTP
+        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
+            server.starttls()
+            server.login(MAIL_USER, MAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f" Código enviado a {destinatario}")
+        return True
+    except Exception as e:
+        print(f" Error al enviar email: {e}")
+        return False
+
+# ============================================
+# ============================================
+# 1. AUTENTICACIÓN Y USUARIOS
+# ============================================
+
+@app.route('/api/test', methods=['GET'])
+def test():
+    return jsonify({"mensaje": "Servidor funcionando correctamente", "estado": "ok", "base_datos": "MongoDB"})
+
+@app.route('/api/registro', methods=['POST'])
+def registrar_usuario():
+    try:
+        datos = request.json
+        nombre = datos.get('nombre', '').strip()
+        email = datos.get('email', '').strip().lower()
+        password = datos.get('password', '')
+        rol = datos.get('rol')
+        telefono = datos.get('telefono')  # opcional
+
+        # Validaciones básicas
+        if not nombre or not email or not password or not rol:
+            return jsonify({"exito": False, "mensaje": "Todos los campos son obligatorios"}), 400
+
+        import re
+        if not re.match(r'^[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]{3,60}$', nombre):
+            return jsonify({"exito": False, "mensaje": "Nombre no válido"}), 400
+
+        if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email):
+            return jsonify({"exito": False, "mensaje": "Correo no válido"}), 400
+
+        if len(password) < 6:
+            return jsonify({"exito": False, "mensaje": "La contraseña debe tener al menos 6 caracteres"}), 400
+
+        if telefono:
+            telefono = str(telefono).strip()
+            if not re.match(r'^\d{10}$', telefono):
+                return jsonify({"exito": False, "mensaje": "El teléfono debe tener 10 dígitos"}), 400
+
+        if db.usuarios.find_one({"email": email}):
+            return jsonify({"exito": False, "mensaje": "El email ya está registrado"}), 400
+
+        nuevo_usuario = {
+            "nombre": nombre,
+            "email": email,
+            "telefono": telefono if telefono else None,
+            "password": password,
+            "rol": rol,
+            "fecha_registro": datetime.now()
+        }
+        resultado = db.usuarios.insert_one(nuevo_usuario)
+        return jsonify({
+            "exito": True,
+            "mensaje": "Usuario registrado correctamente",
+            "usuario_id": str(resultado.inserted_id)
+        })
+    except Exception as error:
+        print(f" Error en registrar_usuario: {error}")
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/iniciar-sesion', methods=['POST'])
+def iniciar_sesion():
+    try:
+        id_cliente = obtener_id_cliente()
+        print(f" Login desde IP: {id_cliente}")
+        
+        # Verificar bloqueo
+        bloqueado, minutos, segundos = verificar_bloqueo(id_cliente)
+        if bloqueado:
+            return jsonify({
+                "exito": False,
+                "bloqueado": True,
+                "mensaje": f"Demasiados intentos fallidos. Bloqueado por {minutos} minutos.",
+                "minutos_restantes": minutos,
+                "segundos_restantes": segundos
+            }), 403
+        
+        datos = request.json
+        email = datos.get('email', '').strip().lower()
+        password = datos.get('password', '').strip()
+        
+        if not email or not password:
+            return jsonify({
+                "exito": False,
+                "mensaje": "Completa todos los campos"
+            }), 400
+        
+        usuario = db.usuarios.find_one({"email": email})
+        
+        if usuario and usuario['password'] == password:
+            # Login exitoso
+            reiniciar_intentos(id_cliente)
+            registrar_actividad(usuario['_id'], "login", f"Desde {id_cliente}")
+            usuario['_id'] = str(usuario['_id'])
+            del usuario['password']
+            return jsonify({
+                "exito": True,
+                "mensaje": "Login exitoso",
+                "usuario": usuario
+            })
+        else:
+            # Login fallido
+            info = registrar_intento_fallido(id_cliente)
+            
+            intentos_restantes = 3 - info["intentos"]
+            if intentos_restantes < 0:
+                intentos_restantes = 0
+            
+            if info["bloqueado"]:
+                mensaje = f"Bloqueado por {info['minutos_restantes']} minutos"
+            elif intentos_restantes > 0:
+                mensaje = f"Email o contraseña incorrectos. Intentos restantes: {intentos_restantes}"
+            else:
+                mensaje = "Email o contraseña incorrectos"
+            
+            return jsonify({
+                "exito": False,
+                "mensaje": mensaje,
+                "intentos_restantes": intentos_restantes,
+                "bloqueado": info["bloqueado"],
+                "minutos_restantes": info.get("minutos_restantes", 0),
+                "segundos_restantes": info.get("segundos_restantes", 0),
+                "intentos": info["intentos"]
+            }), 401
+            
+    except Exception as error:
+        print(f" Error: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+    
+@app.route('/api/estado-intentos', methods=['GET'])
+def estado_intentos():
+    try:
+        id_cliente = obtener_id_cliente()
+        intentos = cargar_intentos()
+        
+        if id_cliente in intentos:
+            data = intentos[id_cliente]
+            bloqueado = False
+            segundos_restantes = 0
+            minutos_restantes = 0
+            
+            if data.get('bloqueo_hasta'):
+                try:
+                    bloqueo_hasta = datetime.fromisoformat(data['bloqueo_hasta'])
+                    ahora = datetime.now()
+                    if ahora < bloqueo_hasta:
+                        bloqueado = True
+                        segundos_restantes = int((bloqueo_hasta - ahora).total_seconds())
+                        if segundos_restantes < 1:
+                            segundos_restantes = 1
+                        minutos_restantes = int(segundos_restantes / 60)
+                        if minutos_restantes < 1:
+                            minutos_restantes = 1
+                    else:
+                        del intentos[id_cliente]
+                        guardar_intentos(intentos)
+                except:
+                    pass
+            
+            return jsonify({
+                "exito": True,
+                "intentos": data.get("intentos", 0),
+                "bloqueado": bloqueado,
+                "minutos_restantes": minutos_restantes,
+                "segundos_restantes": segundos_restantes
+            })
+        
+        return jsonify({
+            "exito": True,
+            "intentos": 0,
+            "bloqueado": False,
+            "minutos_restantes": 0,
+            "segundos_restantes": 0
+        })
+    except Exception as error:
+        return jsonify({
+            "exito": False,
+            "mensaje": str(error)
+        }), 400
+
+@app.route('/api/reiniciar-intentos', methods=['POST'])
+def reiniciar_intentos_endpoint():
+    try:
+        id_cliente = obtener_id_cliente()
+        reiniciar_intentos(id_cliente)
+        return jsonify({
+            "exito": True,
+            "mensaje": "Intentos reiniciados correctamente"
+        })
+    except Exception as error:
+        return jsonify({
+            "exito": False,
+            "mensaje": str(error)
+        }), 400
+
+@app.route('/api/debug-intentos', methods=['GET'])
+def debug_intentos():
+    """Endpoint para depuración - Muestra los intentos guardados"""
+    try:
+        id_cliente = obtener_id_cliente()
+        intentos = cargar_intentos()
+        info = intentos.get(id_cliente, {})
+        return jsonify({
+            "id_cliente": id_cliente,
+            "intentos": info.get("intentos", 0),
+            "bloqueo_hasta": info.get("bloqueo_hasta"),
+            "ultimo_intento": info.get("ultimo_intento"),
+            "todos_los_intentos": intentos
+        })
+    except Exception as error:
+        return jsonify({"error": str(error)}), 400
+
+@app.route('/api/usuarios/buscar', methods=['GET'])
+def buscar_usuario():
+    try:
+        email = request.args.get('email')
+        if not email:
+            return jsonify({"exito": False, "mensaje": "Correo requerido"}), 400
+        usuario = db.usuarios.find_one({"email": email.lower()})
+        if usuario:
+            return jsonify({
+                "exito": True,
+                "usuario": {
+                    "_id": str(usuario["_id"]),
+                    "nombre": usuario["nombre"],
+                    "email": usuario["email"],
+                    "rol": usuario["rol"]
+                }
+            })
+        return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/registrar-actividad', methods=['POST'])
+def api_registrar_actividad():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        tipo = datos.get('tipo', 'accion')
+        descripcion = datos.get('descripcion', '')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        registrar_actividad(usuario_id, tipo, descripcion)
+        return jsonify({"exito": True, "mensaje": "Actividad registrada"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/usuarios/actualizar', methods=['PUT'])
+def actualizar_usuario():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        nombre = datos.get('nombre', '').strip()
+        email = datos.get('email', '').strip().lower()
+        telefono = datos.get('telefono')
+        password = datos.get('password')
+
+        #  Validaciones backend
+        if not usuario_id or not nombre or not email:
+            return jsonify({"exito": False, "mensaje": "Nombre y correo son obligatorios"}), 400
+
+        import re
+        if not re.match(r'^[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]{3,60}$', nombre):
+            return jsonify({"exito": False, "mensaje": "Nombre no válido"}), 400
+
+        if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email):
+            return jsonify({"exito": False, "mensaje": "Correo no válido"}), 400
+
+        if telefono:
+            telefono = str(telefono).strip()
+            if not re.match(r'^\d{10}$', telefono):
+                return jsonify({"exito": False, "mensaje": "El teléfono debe tener 10 dígitos"}), 400
+
+        # Verificar email duplicado
+        existe = db.usuarios.find_one({"email": email, "_id": {"$ne": ObjectId(usuario_id)}})
+        if existe:
+            return jsonify({"exito": False, "mensaje": "El correo ya está registrado"}), 400
+
+        # Construir actualización
+        actualizacion = {
+            "nombre": nombre,
+            "email": email
+        }
+
+        if telefono:
+            actualizacion["telefono"] = telefono
+        elif telefono == "" or telefono is None:
+            actualizacion["telefono"] = None
+
+        if password:
+            if len(password) < 6:
+                return jsonify({"exito": False, "mensaje": "La contraseña debe tener al menos 6 caracteres"}), 400
+            actualizacion["password"] = password
+
+        db.usuarios.update_one({"_id": ObjectId(usuario_id)}, {"$set": actualizacion})
+
+        usuario_actualizado = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        usuario_actualizado["_id"] = str(usuario_actualizado["_id"])
+        usuario_actualizado.pop("password", None)
+
+        return jsonify({
+            "exito": True,
+            "mensaje": "Perfil actualizado correctamente",
+            "usuario": usuario_actualizado
+        })
+    except Exception as error:
+        print(f" Error en actualizar_usuario: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+    
+@app.route('/api/usuarios/subir-foto', methods=['POST'])
+def subir_foto_perfil():
+    try:
+        usuario_id = request.form.get('usuario_id')
+        archivo = request.files.get('foto')
+        if not usuario_id or not archivo:
+            return jsonify({"exito": False, "mensaje": "Datos incompletos"}), 400
+        
+        nombre_archivo = secure_filename(archivo.filename)
+        archivo_id = fs.put(archivo.read(), filename=nombre_archivo, content_type=archivo.content_type)
+        foto_url = f"/api/archivos/{archivo_id}"
+        db.usuarios.update_one({"_id": ObjectId(usuario_id)}, {"$set": {"foto_url": foto_url, "foto_id": str(archivo_id)}})
+        return jsonify({"exito": True, "mensaje": "Foto actualizada", "foto_url": foto_url})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/usuarios/eliminar-foto', methods=['DELETE'])
+def eliminar_foto_perfil():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        # Buscar usuario
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        # Eliminar archivo de GridFS si existe
+        foto_id = usuario.get("foto_id")
+        if foto_id:
+            try:
+                fs.delete(ObjectId(foto_id))
+                print(f" Foto eliminada de GridFS: {foto_id}")
+            except Exception as e:
+                print(f" No se pudo eliminar de GridFS: {e}")
+        
+        # Actualizar usuario en MongoDB
+        db.usuarios.update_one(
+            {"_id": ObjectId(usuario_id)},
+            {"$set": {"foto_url": None, "foto_id": None}}
+        )
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": "Foto eliminada correctamente"
+        })
+    except Exception as error:
+        print(f"Error en eliminar_foto_perfil: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 2. GESTIÓN DE EQUIPOS
+# ============================================
+
+@app.route('/api/equipos/crear', methods=['POST'])
+def crear_equipo():
+    try:
+        datos = request.json
+        nombre = datos.get('nombre')
+        descripcion = datos.get('descripcion', '')
+        lider_id = datos.get('lider_id')
+        
+        if not nombre or not lider_id:
+            return jsonify({"exito": False, "mensaje": "Nombre y líder son obligatorios"}), 400
+        
+        lider = db.usuarios.find_one({"_id": ObjectId(lider_id)})
+        if not lider:
+            return jsonify({"exito": False, "mensaje": "El líder no existe"}), 404
+        
+        nuevo_equipo = {
+            "nombre": nombre,
+            "descripcion": descripcion,
+            "lider_id": ObjectId(lider_id),
+            "fecha_creacion": datetime.now(),
+            "miembros": []
+        }
+        resultado = db.equipos.insert_one(nuevo_equipo)
+        return jsonify({"exito": True, "mensaje": "Equipo creado correctamente", "equipo_id": str(resultado.inserted_id)})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/equipos/<string:usuario_id>', methods=['GET'])
+def listar_equipos(usuario_id):
+    try:
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        equipos = []
+        if usuario['rol'] == 'maestro':
+            cursor = db.equipos.find({"lider_id": ObjectId(usuario_id)})
+        else:
+            cursor = db.equipos.find({"$or": [{"lider_id": ObjectId(usuario_id)}, {"miembros": ObjectId(usuario_id)}]})
+        
+        for equipo in cursor:
+            equipo_data = {
+                "_id": str(equipo["_id"]),
+                "nombre": equipo["nombre"],
+                "descripcion": equipo.get("descripcion", ""),
+                "lider_id": str(equipo["lider_id"]),
+                "fecha_creacion": equipo["fecha_creacion"],
+                "total_miembros": len(equipo.get("miembros", [])),
+                "miembros": [str(m) for m in equipo.get("miembros", [])]
+            }
+            lider = db.usuarios.find_one({"_id": ObjectId(equipo_data["lider_id"])})
+            equipo_data["lider_nombre"] = lider["nombre"] if lider else "Desconocido"
+            equipos.append(equipo_data)
+        
+        return jsonify({"exito": True, "equipos": equipos})
+    except Exception as error:
+        print(f"Error en listar_equipos: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/equipos/detalle/<string:equipo_id>', methods=['GET'])
+def detalle_equipo(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        lider = db.usuarios.find_one({"_id": equipo["lider_id"]})
+        miembros = []
+        for miembro_id in equipo.get('miembros', []):
+            miembro = db.usuarios.find_one({"_id": miembro_id})
+            if miembro:
+                miembros.append({"id": str(miembro["_id"]), "nombre": miembro["nombre"], "email": miembro["email"]})
+        
+        equipo = convertir_objectid(equipo)
+        return jsonify({
+            "exito": True,
+            "equipo": {
+                "id": equipo["_id"],
+                "nombre": equipo["nombre"],
+                "descripcion": equipo["descripcion"],
+                "lider_id": str(equipo["lider_id"]),
+                "lider_nombre": lider["nombre"] if lider else "Desconocido",
+                "fecha_creacion": equipo["fecha_creacion"],
+                "total_miembros": len(miembros),
+                "miembros": miembros
+            }
+        })
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/equipos/unirse', methods=['POST'])
+def unirse_equipo():
+    try:
+        datos = request.json
+        equipo_id = datos.get('equipo_id')
+        usuario_id = datos.get('usuario_id')
+        
+        if not equipo_id or not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Equipo y usuario son obligatorios"}), 400
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "El equipo no existe"}), 404
+        
+        if ObjectId(usuario_id) in equipo.get('miembros', []):
+            return jsonify({"exito": False, "mensaje": "Ya eres miembro de este equipo"}), 400
+        
+        db.equipos.update_one({"_id": ObjectId(equipo_id)}, {"$push": {"miembros": ObjectId(usuario_id)}})
+        return jsonify({"exito": True, "mensaje": "Te has unido al equipo correctamente"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/equipos/eliminar/<string:equipo_id>', methods=['DELETE'])
+def eliminar_equipo(equipo_id):
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "El equipo no existe"}), 404
+        
+        if str(equipo["lider_id"]) != usuario_id:
+            return jsonify({"exito": False, "mensaje": "No tienes permiso para eliminar este equipo"}), 403
+        
+        db.equipos.delete_one({"_id": ObjectId(equipo_id)})
+        return jsonify({"exito": True, "mensaje": "Equipo eliminado correctamente"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/equipos/salir/<string:equipo_id>', methods=['DELETE'])
+def salir_del_equipo(equipo_id):
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "El equipo no existe"}), 404
+        
+        if str(equipo["lider_id"]) == usuario_id:
+            return jsonify({"exito": False, "mensaje": "Eres el líder del equipo. No puedes salir, solo eliminarlo."}), 403
+        
+        if ObjectId(usuario_id) not in equipo.get('miembros', []):
+            return jsonify({"exito": False, "mensaje": "No eres miembro de este equipo"}), 404
+        
+        db.equipos.update_one({"_id": ObjectId(equipo_id)}, {"$pull": {"miembros": ObjectId(usuario_id)}})
+        return jsonify({"exito": True, "mensaje": "Has salido del equipo correctamente"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+# ============================================
+# 3. GESTIÓN DE TAREAS
+# ============================================
+
+@app.route('/api/tareas/crear', methods=['POST'])
+def crear_tarea():
+    try:
+        datos = request.json
+        titulo = datos.get('titulo')
+        descripcion = datos.get('descripcion', '')
+        equipo_id = datos.get('equipo_id')
+        creador_id = datos.get('creador_id')
+        fecha_limite = datos.get('fecha_limite')
+        
+        if not titulo or not equipo_id or not creador_id:
+            return jsonify({"exito": False, "mensaje": "Título, equipo y creador son obligatorios"}), 400
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "El equipo no existe"}), 404
+        
+        if str(equipo["lider_id"]) != creador_id:
+            return jsonify({"exito": False, "mensaje": "Solo el líder del equipo puede crear tareas"}), 403
+        
+        fecha_limite_obj = datetime.strptime(fecha_limite, '%Y-%m-%d') if fecha_limite else None
+        
+        nueva_tarea = {
+            "titulo": titulo,
+            "descripcion": descripcion,
+            "equipo_id": ObjectId(equipo_id),
+            "creador_id": ObjectId(creador_id),
+            "fecha_limite": fecha_limite_obj,
+            "fecha_creacion": datetime.now(),
+            "archivos_adjuntos": []
+        }
+        resultado = db.tareas.insert_one(nueva_tarea)
+        return jsonify({"exito": True, "mensaje": "Tarea creada correctamente", "tarea_id": str(resultado.inserted_id)})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/tareas/equipo/<string:equipo_id>', methods=['GET'])
+def listar_tareas_equipo(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        lider_id = str(equipo["lider_id"]) if equipo else None
+        
+        cursor = db.tareas.find({"equipo_id": ObjectId(equipo_id)})
+        tareas = []
+        for tarea in cursor:
+            tarea_data = {
+                "_id": str(tarea["_id"]),
+                "titulo": tarea["titulo"],
+                "descripcion": tarea.get("descripcion", ""),
+                "equipo_id": str(tarea["equipo_id"]),
+                "creador_id": str(tarea["creador_id"]),
+                "fecha_limite": tarea.get("fecha_limite"),
+                "fecha_creacion": tarea["fecha_creacion"],
+                "lider_id": lider_id
+            }
+            creador = db.usuarios.find_one({"_id": tarea["creador_id"]})
+            tarea_data["creador_nombre"] = creador["nombre"] if creador else "Desconocido"
+            equipo_nombre = db.equipos.find_one({"_id": tarea["equipo_id"]})
+            tarea_data["equipo_nombre"] = equipo_nombre["nombre"] if equipo_nombre else "Desconocido"
+            tarea_data["total_entregas"] = db.entregas.count_documents({"tarea_id": ObjectId(tarea["_id"])})
+            tareas.append(tarea_data)
+        
+        tareas.sort(key=lambda x: x.get('fecha_limite') or datetime.max)
+        return jsonify({"exito": True, "tareas": tareas})
+    except Exception as error:
+        print(f"Error en listar_tareas_equipo: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/tareas/detalle/<string:tarea_id>', methods=['GET'])
+def detalle_tarea(tarea_id):
+    try:
+        tarea = db.tareas.find_one({"_id": ObjectId(tarea_id)})
+        if not tarea:
+            return jsonify({"exito": False, "mensaje": "Tarea no encontrada"}), 404
+        
+        equipo = db.equipos.find_one({"_id": tarea["equipo_id"]})
+        tarea_data = {
+            "_id": str(tarea["_id"]),
+            "titulo": tarea["titulo"],
+            "descripcion": tarea.get("descripcion", ""),
+            "equipo_id": str(tarea["equipo_id"]),
+            "creador_id": str(tarea["creador_id"]),
+            "fecha_limite": tarea.get("fecha_limite"),
+            "fecha_creacion": tarea["fecha_creacion"],
+            "lider_id": str(equipo["lider_id"]) if equipo else None
+        }
+        creador = db.usuarios.find_one({"_id": tarea["creador_id"]})
+        tarea_data["creador_nombre"] = creador["nombre"] if creador else "Desconocido"
+        tarea_data["equipo_nombre"] = equipo["nombre"] if equipo else "Desconocido"
+        
+        entregas = []
+        cursor = db.entregas.find({"tarea_id": ObjectId(tarea_id)})
+        for entrega in cursor:
+            entrega_data = {
+                "_id": str(entrega["_id"]),
+                "tarea_id": str(entrega["tarea_id"]),
+                "alumno_id": str(entrega["alumno_id"]),
+                "comentario": entrega.get("comentario", ""),
+                "archivo_id": str(entrega["archivo_id"]) if entrega.get("archivo_id") else None,
+                "nombre_archivo": entrega.get("nombre_archivo"),
+                "calificacion": entrega.get("calificacion"),
+                "fecha_entrega": entrega["fecha_entrega"]
+            }
+            alumno = db.usuarios.find_one({"_id": entrega["alumno_id"]})
+            entrega_data["alumno_nombre"] = alumno["nombre"] if alumno else "Desconocido"
+            entregas.append(entrega_data)
+        
+        tarea_data["entregas"] = entregas
+        return jsonify({"exito": True, "tarea": tarea_data})
+    except Exception as error:
+        print(f"Error en detalle_tarea: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/tareas/alumno/<string:alumno_id>', methods=['GET'])
+def tareas_alumno(alumno_id):
+    try:
+        equipos = db.equipos.find({"$or": [{"lider_id": ObjectId(alumno_id)}, {"miembros": ObjectId(alumno_id)}]})
+        equipos_ids = [equipo["_id"] for equipo in equipos]
+        if not equipos_ids:
+            return jsonify({"exito": True, "tareas": []})
+        
+        tareas_pendientes = []
+        entregas_realizadas = [e["tarea_id"] for e in db.entregas.find({"alumno_id": ObjectId(alumno_id)})]
+        cursor = db.tareas.find({"equipo_id": {"$in": equipos_ids}, "_id": {"$nin": entregas_realizadas}})
+        
+        for tarea in cursor:
+            equipo = db.equipos.find_one({"_id": tarea["equipo_id"]})
+            tarea_data = {
+                "_id": str(tarea["_id"]),
+                "titulo": tarea["titulo"],
+                "descripcion": tarea.get("descripcion", ""),
+                "equipo_id": str(tarea["equipo_id"]),
+                "creador_id": str(tarea["creador_id"]),
+                "fecha_limite": tarea.get("fecha_limite"),
+                "fecha_creacion": tarea["fecha_creacion"],
+                "lider_id": str(equipo["lider_id"]) if equipo else None,
+                "equipo_nombre": equipo["nombre"] if equipo else "Desconocido"
+            }
+            tareas_pendientes.append(tarea_data)
+        
+        return jsonify({"exito": True, "tareas": tareas_pendientes})
+    except Exception as error:
+        print(f"Error en tareas_alumno: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/tareas/lider/<string:lider_id>', methods=['GET'])
+def tareas_lider(lider_id):
+    try:
+        equipos = db.equipos.find({"lider_id": ObjectId(lider_id)})
+        equipos_ids = [equipo["_id"] for equipo in equipos]
+        
+        tareas = []
+        cursor = db.tareas.find({"equipo_id": {"$in": equipos_ids}}).sort("fecha_creacion", -1).limit(10)
+        
+        for tarea in cursor:
+            tarea_data = {
+                "_id": str(tarea["_id"]),
+                "titulo": tarea["titulo"],
+                "descripcion": tarea.get("descripcion", ""),
+                "equipo_id": str(tarea["equipo_id"]),
+                "creador_id": str(tarea["creador_id"]),
+                "fecha_limite": tarea.get("fecha_limite"),
+                "fecha_creacion": tarea["fecha_creacion"],
+                "total_entregas": db.entregas.count_documents({"tarea_id": tarea["_id"]})
+            }
+            equipo = db.equipos.find_one({"_id": tarea["equipo_id"]})
+            tarea_data["equipo_nombre"] = equipo["nombre"] if equipo else "Desconocido"
+            tareas.append(tarea_data)
+        
+        return jsonify({"exito": True, "tareas": tareas})
+    except Exception as error:
+        print(f"Error en tareas_lider: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 4. ENTREGAS Y ARCHIVOS
+# ============================================
+
+@app.route('/api/entregas/subir', methods=['POST'])
+def subir_archivo_entrega():
+    try:
+        tarea_id = request.form.get('tarea_id')
+        alumno_id = request.form.get('alumno_id')
+        comentario = request.form.get('comentario', '')
+        
+        if not tarea_id or not alumno_id:
+            return jsonify({"exito": False, "mensaje": "Faltan datos"}), 400
+        
+        entrega_existente = db.entregas.find_one({"tarea_id": ObjectId(tarea_id), "alumno_id": ObjectId(alumno_id)})
+        if entrega_existente:
+            return jsonify({"exito": False, "mensaje": "Ya entregaste esta tarea"}), 400
+        
+        archivo = request.files.get('archivo')
+        archivo_id = None
+        nombre_archivo = None
+        
+        if archivo:
+            nombre_archivo = secure_filename(archivo.filename)
+            archivo_id = fs.put(archivo.read(), filename=nombre_archivo, content_type=archivo.content_type)
+        
+        nueva_entrega = {
+            "tarea_id": ObjectId(tarea_id),
+            "alumno_id": ObjectId(alumno_id),
+            "comentario": comentario,
+            "archivo_id": archivo_id,
+            "nombre_archivo": nombre_archivo,
+            "calificacion": None,
+            "fecha_entrega": datetime.now()
+        }
+        db.entregas.insert_one(nueva_entrega)
+        return jsonify({"exito": True, "mensaje": "Tarea entregada con éxito"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/entregas/calificar', methods=['PUT'])
+def calificar_entrega():
+    try:
+        datos = request.json
+        entrega_id = datos.get('entrega_id')
+        calificacion = datos.get('calificacion')
+        
+        if not entrega_id or calificacion is None:
+            return jsonify({"exito": False, "mensaje": "ID de entrega y calificación son obligatorios"}), 400
+        
+        if calificacion < 0 or calificacion > 100:
+            return jsonify({"exito": False, "mensaje": "La calificación debe estar entre 0 y 100"}), 400
+        
+        db.entregas.update_one({"_id": ObjectId(entrega_id)}, {"$set": {"calificacion": calificacion}})
+        return jsonify({"exito": True, "mensaje": "Calificación guardada"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": f"Error: {str(error)}"}), 400
+
+@app.route('/api/archivos/<string:archivo_id>')
+def servir_archivo_gridfs(archivo_id):
+    try:
+        archivo = fs.get(ObjectId(archivo_id))
+        return Response(archivo.read(), mimetype=archivo.content_type)
+    except Exception as error:
+        return jsonify({"error": "Archivo no encontrado"}), 404
+
+# ============================================
+# 5. CHAT
+# ============================================
+
+@app.route('/api/chat/<string:equipo_id>', methods=['GET'])
+def obtener_mensajes(equipo_id):
+    try:
+        equipo_obj_id = ObjectId(equipo_id)
+        cursor = db.mensajes_chat.find({"equipo_id": equipo_obj_id}).sort("fecha_envio", 1).limit(100)
+        
+        mensajes = []
+        for msg in cursor:
+            msg['_id'] = str(msg['_id'])
+            msg['equipo_id'] = str(msg['equipo_id'])
+            msg['usuario_id'] = str(msg['usuario_id'])
+            usuario = db.usuarios.find_one({"_id": ObjectId(msg['usuario_id'])})
+            msg['usuario_nombre'] = usuario['nombre'] if usuario else "Desconocido"
+            msg['rol'] = usuario['rol'] if usuario else "alumno"
+            mensajes.append(msg)
+        
+        return jsonify({"exito": True, "mensajes": mensajes})
+    except Exception as error:
+        print(f"Error en obtener_mensajes: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/chat/enviar', methods=['POST'])
+def enviar_mensaje():
+    try:
+        datos = request.json
+        equipo_id = datos.get('equipo_id')
+        usuario_id = datos.get('usuario_id')
+        mensaje_texto = datos.get('mensaje', '').strip()
+        
+        if not mensaje_texto:
+            return jsonify({"exito": False, "mensaje": "El mensaje no puede estar vacío"}), 400
+        
+        nuevo_mensaje = {
+            "equipo_id": ObjectId(equipo_id),
+            "usuario_id": ObjectId(usuario_id),
+            "mensaje": mensaje_texto,
+            "fecha_envio": datetime.now()
+        }
+        db.mensajes_chat.insert_one(nuevo_mensaje)
+        return jsonify({"exito": True, "mensaje": "Mensaje enviado"})
+    except Exception as error:
+        print(f"Error en enviar_mensaje: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 6. ANÁLISIS Y RENDIMIENTO
+# ============================================
+
+@app.route('/api/analisis/equipo/<string:equipo_id>', methods=['GET'])
+def analisis_equipo(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        alumnos = []
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if usuario:
+                entregas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+                calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+                promedio = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+                alumno_data = {
+                    "_id": str(usuario["_id"]),
+                    "nombre": usuario["nombre"],
+                    "email": usuario["email"],
+                    "estadisticas": {
+                        "promedio": promedio,
+                        "tareas_completadas": len([c for c in calificaciones if c >= 60]),
+                        "tareas_totales": len(calificaciones),
+                        "entregas_tardias": 0
+                    },
+                    "riesgo": {"bajo_rendimiento": promedio < 70, "reprobacion": promedio < 60}
+                }
+                alumnos.append(alumno_data)
+        
+        promedios = [a["estadisticas"]["promedio"] for a in alumnos]
+        stats = {
+            "total_alumnos": len(alumnos),
+            "promedio_general": sum(promedios) / len(promedios) if promedios else 0,
+            "alumnos_riesgo": sum(1 for a in alumnos if a["riesgo"]["reprobacion"]),
+            "alumnos": alumnos
+        }
+        return jsonify({"exito": True, "estadisticas": stats})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/analisis/graficas/<string:equipo_id>', methods=['GET'])
+def graficas_rendimiento(equipo_id):
+    try:
+        tareas = list(db.tareas.find({"equipo_id": ObjectId(equipo_id)}))
+        tareas_data = []
+        for tarea in tareas:
+            entregas = list(db.entregas.find({"tarea_id": tarea["_id"]}))
+            calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+            promedio_tarea = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+            tareas_data.append({"titulo": tarea["titulo"], "promedio": promedio_tarea, "entregas": len(entregas)})
+        
+        rangos = {"0-59": 0, "60-69": 0, "70-79": 0, "80-89": 0, "90-100": 0}
+        todas_calificaciones = []
+        for tarea in tareas:
+            entregas = list(db.entregas.find({"tarea_id": tarea["_id"]}))
+            for e in entregas:
+                calif = e.get("calificacion")
+                if calif is not None:
+                    todas_calificaciones.append(calif)
+                    if calif < 60:
+                        rangos["0-59"] += 1
+                    elif calif < 70:
+                        rangos["60-69"] += 1
+                    elif calif < 80:
+                        rangos["70-79"] += 1
+                    elif calif < 90:
+                        rangos["80-89"] += 1
+                    else:
+                        rangos["90-100"] += 1
+        
+        return jsonify({"exito": True, "tareas": tareas_data, "distribucion": rangos, "total_calificaciones": len(todas_calificaciones)})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/analisis/riesgo/<string:equipo_id>', methods=['GET'])
+def detectar_riesgo(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        resultados = []
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if not usuario:
+                continue
+            
+            entregas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+            calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+            promedio = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+            tareas_completadas = len([c for c in calificaciones if c >= 60])
+            tareas_totales = len(calificaciones)
+            
+            nivel_riesgo = "Sin riesgo"
+            if promedio < 60:
+                nivel_riesgo = "Alto"
+            elif promedio < 70:
+                nivel_riesgo = "Medio"
+            elif promedio < 80:
+                nivel_riesgo = "Bajo"
+            
+            resultados.append({
+                "_id": str(usuario["_id"]),
+                "nombre": usuario["nombre"],
+                "promedio": promedio,
+                "tareas_completadas": tareas_completadas,
+                "tareas_totales": tareas_totales,
+                "entregas_tardias": 0,
+                "riesgos": {"bajo_rendimiento": promedio < 70, "riesgo_reprobacion": promedio < 60},
+                "nivel_riesgo": nivel_riesgo
+            })
+        
+        return jsonify({"exito": True, "alumnos": resultados})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/analisis/segmentacion/<string:equipo_id>', methods=['GET'])
+def segmentacion_estudiantes(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        segmentacion = {
+            "desempeno": {"alto": [], "regular": [], "bajo": [], "alto_count": 0, "regular_count": 0, "bajo_count": 0},
+            "participacion": {"alta": [], "media": [], "baja": [], "alta_count": 0, "media_count": 0, "baja_count": 0},
+            "comportamiento": {"positivo": [], "neutro": [], "negativo": [], "positivo_count": 0, "neutro_count": 0, "negativo_count": 0}
+        }
+        
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if not usuario:
+                continue
+            
+            entregas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+            calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+            promedio = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+            tareas_completadas = len([c for c in calificaciones if c >= 60])
+            tareas_totales = len(calificaciones) or 1
+            porcentaje_participacion = (tareas_completadas / tareas_totales) * 100
+            entregas_tardias = 0
+            
+            alumno_info = {
+                "_id": str(usuario["_id"]),
+                "nombre": usuario["nombre"],
+                "promedio": round(promedio, 1),
+                "participacion": round(porcentaje_participacion, 1),
+                "entregas_tardias": entregas_tardias
+            }
+            
+            if promedio >= 85:
+                segmentacion["desempeno"]["alto"].append(alumno_info)
+                segmentacion["desempeno"]["alto_count"] += 1
+            elif promedio >= 70:
+                segmentacion["desempeno"]["regular"].append(alumno_info)
+                segmentacion["desempeno"]["regular_count"] += 1
+            else:
+                segmentacion["desempeno"]["bajo"].append(alumno_info)
+                segmentacion["desempeno"]["bajo_count"] += 1
+            
+            if porcentaje_participacion >= 80:
+                segmentacion["participacion"]["alta"].append(alumno_info)
+                segmentacion["participacion"]["alta_count"] += 1
+            elif porcentaje_participacion >= 50:
+                segmentacion["participacion"]["media"].append(alumno_info)
+                segmentacion["participacion"]["media_count"] += 1
+            else:
+                segmentacion["participacion"]["baja"].append(alumno_info)
+                segmentacion["participacion"]["baja_count"] += 1
+            
+            if entregas_tardias == 0:
+                segmentacion["comportamiento"]["positivo"].append(alumno_info)
+                segmentacion["comportamiento"]["positivo_count"] += 1
+            elif entregas_tardias <= 2:
+                segmentacion["comportamiento"]["neutro"].append(alumno_info)
+                segmentacion["comportamiento"]["neutro_count"] += 1
+            else:
+                segmentacion["comportamiento"]["negativo"].append(alumno_info)
+                segmentacion["comportamiento"]["negativo_count"] += 1
+        
+        return jsonify({"exito": True, "segmentacion": segmentacion})
+    except Exception as error:
+        print(f"Error en segmentacion_estudiantes: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/analisis/abandono/<string:equipo_id>', methods=['GET'])
+def detectar_abandono(equipo_id):
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        fecha_limite = datetime.now() - timedelta(days=7)
+        fecha_limite_chat = datetime.now() - timedelta(days=30)
+        
+        resultados = []
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if not usuario:
+                continue
+            
+            ultima_actividad = db.actividad.find_one({"usuario_id": usuario["_id"]}, sort=[("fecha", -1)])
+            dias_inactivo = (datetime.now() - ultima_actividad["fecha"]).days if ultima_actividad else 99
+            actividad_alerta = dias_inactivo > 7
+            
+            tareas_equipo = list(db.tareas.find({"equipo_id": ObjectId(equipo_id)}))
+            entregas_realizadas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+            tareas_entregadas_ids = [e["tarea_id"] for e in entregas_realizadas]
+            tareas_no_entregadas = [t for t in tareas_equipo if t["_id"] not in tareas_entregadas_ids]
+            tareas_alerta = len(tareas_no_entregadas) > 2
+            
+            mensajes_recientes = db.mensajes_chat.count_documents({
+                "usuario_id": usuario["_id"],
+                "fecha_envio": {"$gte": fecha_limite_chat}
+            })
+            chat_alerta = mensajes_recientes < 3
+            
+            nivel_riesgo = sum([actividad_alerta, tareas_alerta, chat_alerta])
+            nivel = "Alto" if nivel_riesgo >= 2 else "Medio" if nivel_riesgo >= 1 else "Bajo"
+            
+            resultados.append({
+                "_id": str(usuario["_id"]),
+                "nombre": usuario["nombre"],
+                "dias_inactivo": dias_inactivo,
+                "tareas_pendientes": len(tareas_no_entregadas),
+                "mensajes_recientes": mensajes_recientes,
+                "alertas": {"actividad": actividad_alerta, "tareas": tareas_alerta, "chat": chat_alerta},
+                "nivel_riesgo_abandono": nivel
+            })
+        
+        orden = {"Alto": 0, "Medio": 1, "Bajo": 2}
+        resultados.sort(key=lambda x: orden.get(x["nivel_riesgo_abandono"], 3))
+        
+        return jsonify({
+            "exito": True,
+            "abandono": resultados,
+            "resumen": {
+                "total_alumnos": len(resultados),
+                "alto_riesgo": len([r for r in resultados if r["nivel_riesgo_abandono"] == "Alto"]),
+                "medio_riesgo": len([r for r in resultados if r["nivel_riesgo_abandono"] == "Medio"]),
+                "bajo_riesgo": len([r for r in resultados if r["nivel_riesgo_abandono"] == "Bajo"])
+            }
+        })
+    except Exception as error:
+        print(f"Error en detectar_abandono: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/analisis/alumno/<string:alumno_id>', methods=['GET'])
+def reporte_detallado_alumno(alumno_id):
+    try:
+        alumno = db.usuarios.find_one({"_id": ObjectId(alumno_id)})
+        if not alumno:
+            return jsonify({"exito": False, "mensaje": "Alumno no encontrado"}), 404
+        
+        equipos = list(db.equipos.find({"$or": [{"lider_id": ObjectId(alumno_id)}, {"miembros": ObjectId(alumno_id)}]}))
+        equipos_info = []
+        for equipo in equipos:
+            equipos_info.append({
+                "_id": str(equipo["_id"]),
+                "nombre": equipo["nombre"],
+                "rol": "Líder" if str(equipo["lider_id"]) == alumno_id else "Miembro",
+                "total_miembros": len(equipo.get("miembros", []))
+            })
+        
+        entregas = list(db.entregas.find({"alumno_id": ObjectId(alumno_id)}))
+        tareas_ids = [e["tarea_id"] for e in entregas if e.get("tarea_id")]
+        tareas_detalle = []
+        for entrega in entregas:
+            tarea = db.tareas.find_one({"_id": entrega["tarea_id"]})
+            if tarea:
+                equipo = db.equipos.find_one({"_id": tarea["equipo_id"]})
+                equipo_nombre = equipo["nombre"] if equipo else "Sin equipo"
+                estado = "completada"
+                if tarea.get("fecha_limite") and not entrega.get("calificacion"):
+                    estado = "vencida" if datetime.now() > tarea["fecha_limite"] else "pendiente"
+                tareas_detalle.append({
+                    "_id": str(tarea["_id"]),
+                    "titulo": tarea["titulo"],
+                    "equipo_nombre": equipo_nombre,
+                    "estado": estado,
+                    "calificacion": entrega.get("calificacion"),
+                    "fecha_entrega": entrega.get("fecha_entrega"),
+                    "fecha_limite": tarea.get("fecha_limite")
+                })
+        
+        equipos_ids = [equipo["_id"] for equipo in equipos]
+        if equipos_ids:
+            tareas_pendientes = list(db.tareas.find({"equipo_id": {"$in": equipos_ids}, "_id": {"$nin": tareas_ids}}))
+            for tarea in tareas_pendientes:
+                equipo = db.equipos.find_one({"_id": tarea["equipo_id"]})
+                equipo_nombre = equipo["nombre"] if equipo else "Sin equipo"
+                estado = "pendiente"
+                if tarea.get("fecha_limite") and datetime.now() > tarea["fecha_limite"]:
+                    estado = "vencida"
+                tareas_detalle.append({
+                    "_id": str(tarea["_id"]),
+                    "titulo": tarea["titulo"],
+                    "equipo_nombre": equipo_nombre,
+                    "estado": estado,
+                    "calificacion": None,
+                    "fecha_entrega": None,
+                    "fecha_limite": tarea.get("fecha_limite")
+                })
+        
+        calificaciones = [t["calificacion"] for t in tareas_detalle if t["calificacion"] is not None]
+        promedio_general = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+        tareas_completadas = len([t for t in tareas_detalle if t["estado"] == "completada"])
+        tareas_pendientes = len([t for t in tareas_detalle if t["estado"] == "pendiente"])
+        tareas_vencidas = len([t for t in tareas_detalle if t["estado"] == "vencida"])
+        entregas_tardias = sum(1 for t in tareas_detalle if t.get("fecha_entrega") and t.get("fecha_limite") and t["fecha_entrega"] > t["fecha_limite"])
+        
+        rendimiento_equipos = []
+        for equipo in equipos:
+            tareas_equipo = [t for t in tareas_detalle if t["equipo_nombre"] == equipo["nombre"]]
+            calif_equipo = [t["calificacion"] for t in tareas_equipo if t["calificacion"] is not None]
+            promedio_equipo = sum(calif_equipo) / len(calif_equipo) if calif_equipo else 0
+            rendimiento_equipos.append({
+                "equipo_nombre": equipo["nombre"],
+                "promedio": promedio_equipo,
+                "tareas_completadas": len([t for t in tareas_equipo if t["estado"] == "completada"]),
+                "tareas_totales": len(tareas_equipo),
+                "entregas_tardias": len([t for t in tareas_equipo if t.get("fecha_entrega") and t.get("fecha_limite") and t["fecha_entrega"] > t["fecha_limite"]])
+            })
+        
+        return jsonify({
+            "exito": True,
+            "alumno": {
+                "_id": str(alumno["_id"]),
+                "nombre": alumno["nombre"],
+                "email": alumno["email"],
+                "foto_url": alumno.get("foto_url"),
+                "rol": alumno["rol"],
+                "estado": "Activo" if len(tareas_detalle) > 0 else "Inactivo",
+                "promedio_general": round(promedio_general, 1),
+                "total_tareas": len(tareas_detalle),
+                "tareas_completadas": tareas_completadas,
+                "tareas_pendientes": tareas_pendientes,
+                "tareas_vencidas": tareas_vencidas,
+                "entregas_tardias": entregas_tardias,
+                "equipos": equipos_info,
+                "rendimiento_equipos": rendimiento_equipos,
+                "tareas": tareas_detalle
+            }
+        })
+    except Exception as error:
+        print(f"❌ Error en reporte_detallado_alumno: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 7. ANÁLISIS NO SUPERVISADO - CLUSTER (K-MEANS)
+# ============================================
+
+@app.route('/api/analisis/cluster', methods=['POST'])
+def analisis_cluster():
+    print("🔄 ANALISIS CLUSTER - EJECUTANDO")
+    
+    try:
+        datos = request.json
+        equipo_id = datos.get('equipo_id')
+        k = datos.get('k', 3)
+        features_seleccion = datos.get('features', 'all')
+        
+        if not equipo_id:
+            return jsonify({"exito": False, "mensaje": "Equipo no especificado"}), 400
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        
+        alumnos_data = []
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if not usuario:
+                continue
+            
+            entregas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+            calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+            promedio = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+            
+            tareas_completadas = len([c for c in calificaciones if c >= 60])
+            tareas_totales = len(calificaciones) or 1
+            participacion = (tareas_completadas / tareas_totales) * 100
+            entregas_tardias = 0
+            
+            alumnos_data.append({
+                "alumno_id": str(usuario["_id"]),
+                "nombre": usuario["nombre"],
+                "promedio": promedio,
+                "tareas_completadas": tareas_completadas,
+                "tareas_totales": tareas_totales,
+                "participacion": participacion,
+                "entregas_tardias": entregas_tardias
+            })
+        
+        if len(alumnos_data) < 3:
+            return jsonify({"exito": False, "mensaje": "Se necesitan al menos 3 alumnos para el análisis"}), 400
+        
+        import numpy as np
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.decomposition import PCA
+        from sklearn.cluster import KMeans
+        from sklearn.metrics import silhouette_score
+        import time
+        
+        features_map = {
+            'all': ['promedio', 'tareas_completadas', 'tareas_totales', 'participacion', 'entregas_tardias'],
+            'academic': ['promedio', 'tareas_completadas'],
+            'participation': ['participacion', 'tareas_completadas'],
+            'behavior': ['entregas_tardias', 'tareas_completadas']
+        }
+        
+        features_seleccionadas = features_map.get(features_seleccion, features_map['all'])
+        X = np.array([[d[f] for f in features_seleccionadas] for d in alumnos_data])
+        
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        tiempo_inicio = time.time()
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels_originales = kmeans.fit_predict(X_scaled)
+        tiempo_fin = time.time()
+        
+        inercia = kmeans.inertia_
+        centroids = kmeans.cluster_centers_.tolist()
+        iteraciones = kmeans.n_iter_
+        
+        silueta = 0
+        if k > 1 and len(set(labels_originales)) > 1:
+            try:
+                silueta = silhouette_score(X_scaled, labels_originales)
+            except:
+                silueta = 0
+        
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X_scaled)
+        
+        # Reordenar clusters por promedio
+        cluster_promedios = []
+        for i in range(k):
+            indices_cluster = np.where(labels_originales == i)[0]
+            prom = np.mean([alumnos_data[idx]["promedio"] for idx in indices_cluster]) if len(indices_cluster) > 0 else 0
+            cluster_promedios.append({"cluster_original": i, "promedio": prom, "indices": indices_cluster})
+        
+        cluster_promedios.sort(key=lambda x: x["promedio"], reverse=True)
+        
+        labels_reordenados = np.full(len(alumnos_data), -1)
+        for nuevo_idx, item in enumerate(cluster_promedios):
+            for idx in item["indices"]:
+                labels_reordenados[idx] = nuevo_idx
+        
+        pca_data = []
+        for i, (x, y) in enumerate(X_pca):
+            pca_data.append({
+                "pc1": float(x),
+                "pc2": float(y),
+                "cluster": int(labels_reordenados[i]),
+                "nombre": alumnos_data[i]["nombre"],
+                "promedio": alumnos_data[i]["promedio"]
+            })
+        
+        centroids_nombres = []
+        for i in range(k):
+            centroid_dict = {"cluster": i + 1}
+            indices_cluster = np.where(labels_reordenados == i)[0]
+            if len(indices_cluster) > 0:
+                for feat in features_seleccionadas:
+                    centroid_dict[feat] = float(np.mean([alumnos_data[idx][feat] for idx in indices_cluster]))
+            else:
+                for feat in features_seleccionadas:
+                    centroid_dict[feat] = 0.0
+            centroids_nombres.append(centroid_dict)
+        
+        alumnos_clusters = []
+        for i, alumno in enumerate(alumnos_data):
+            alumnos_clusters.append({
+                "alumno": alumno["nombre"],
+                "nombre": alumno["nombre"],
+                "alumno_id": alumno["alumno_id"],
+                "cluster": int(labels_reordenados[i]),
+                "promedio": alumno["promedio"]
+            })
+        
+        # Método del codo (Elbow)
+        elbow_data = []
+        max_k = min(10, len(alumnos_data) - 1)
+        for k_test in range(2, max_k + 1):
+            kmeans_test = KMeans(n_clusters=k_test, random_state=42, n_init=10)
+            kmeans_test.fit(X_scaled)
+            elbow_data.append({"k": k_test, "inercia": float(kmeans_test.inertia_)})
+        
+        # Índice de Silueta
+        silueta_data = []
+        for k_test in range(2, max_k + 1):
+            kmeans_test = KMeans(n_clusters=k_test, random_state=42, n_init=10)
+            labels_test = kmeans_test.fit_predict(X_scaled)
+            try:
+                sil_score = silhouette_score(X_scaled, labels_test)
+            except:
+                sil_score = 0
+            silueta_data.append({"k": k_test, "silueta": float(sil_score)})
+        
+        mejor_k = 2
+        if len(elbow_data) >= 3:
+            diff1 = [elbow_data[i]["inercia"] - elbow_data[i+1]["inercia"] for i in range(len(elbow_data)-1)]
+            if len(diff1) >= 2:
+                diff2 = [diff1[i] - diff1[i+1] for i in range(len(diff1)-1)]
+                if diff2:
+                    mejor_k = elbow_data[diff2.index(max(diff2)) + 1]["k"] if max(diff2) > 0 else 2
+        
+        return jsonify({
+            "exito": True,
+            "k": k,
+            "algoritmo": "K-Means",
+            "inercia": float(inercia),
+            "silueta": float(silueta),
+            "mejor_k": mejor_k,
+            "iteraciones": iteraciones,
+            "tiempo_entrenamiento": f"{tiempo_fin - tiempo_inicio:.3f}s",
+            "features_utilizadas": ", ".join(features_seleccionadas),
+            "centroids": centroids_nombres,
+            "elbow_data": elbow_data,
+            "silueta_data": silueta_data,
+            "pca_data": pca_data,
+            "alumnos_clusters": alumnos_clusters,
+            "total_alumnos": len(alumnos_data)
+        })
+    except Exception as error:
+        print(f"❌ Error en analisis_cluster: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# API: DATOS PARA VISUALIZACION GENERAL
+# ============================================
+@app.route('/api/analisis/vizualizacion/<string:equipo_id>', methods=['GET'])
+def obtener_datos_vizualizacion(equipo_id):
+    """
+    Devuelve datos estructurados para todas las graficas de visualizacion
+    """
+    try:
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo:
+            return jsonify({"exito": False, "mensaje": "Equipo no encontrado"}), 404
+        
+        miembros_ids = equipo.get("miembros", [])
+        
+        # Obtener datos de alumnos
+        alumnos_data = []
+        for miembro_id in miembros_ids:
+            usuario = db.usuarios.find_one({"_id": miembro_id, "rol": "alumno"})
+            if not usuario:
+                continue
+            
+            entregas = list(db.entregas.find({"alumno_id": usuario["_id"]}))
+            calificaciones = [e.get("calificacion") for e in entregas if e.get("calificacion") is not None]
+            
+            promedio = sum(calificaciones) / len(calificaciones) if calificaciones else 0
+            tareas_completadas = len([c for c in calificaciones if c >= 60])
+            tareas_totales = len(calificaciones)
+            participacion = (tareas_completadas / tareas_totales) * 100 if tareas_totales > 0 else 0
+            entregas_tardias = len([e for e in entregas if e.get('fecha_entrega') and e.get('fecha_limite') and e['fecha_entrega'] > e['fecha_limite']])
+            
+            # Determinar nivel de riesgo
+            if promedio < 60:
+                nivel_riesgo = "Alto"
+            elif promedio < 70:
+                nivel_riesgo = "Medio"
+            elif promedio < 80:
+                nivel_riesgo = "Bajo"
+            else:
+                nivel_riesgo = "Sin riesgo"
+            
+            alumnos_data.append({
+                "alumno_id": str(usuario["_id"]),
+                "nombre": usuario["nombre"],
+                "promedio": round(promedio, 1),
+                "tareas_completadas": tareas_completadas,
+                "tareas_totales": tareas_totales,
+                "participacion": round(participacion, 1),
+                "entregas_tardias": entregas_tardias,
+                "nivel_riesgo": nivel_riesgo,
+                "calificaciones": calificaciones
+            })
+        
+        # Obtener tareas del equipo
+        tareas = list(db.tareas.find({"equipo_id": ObjectId(equipo_id)}))
+        tareas_data = []
+        for tarea in tareas:
+            entregas_tarea = list(db.entregas.find({"tarea_id": tarea["_id"]}))
+            calif_tarea = [e.get("calificacion") for e in entregas_tarea if e.get("calificacion") is not None]
+            tareas_data.append({
+                "tarea_id": str(tarea["_id"]),
+                "titulo": tarea["titulo"],
+                "promedio": sum(calif_tarea) / len(calif_tarea) if calif_tarea else 0,
+                "entregas": len(entregas_tarea),
+                "calificaciones": calif_tarea
+            })
+        
+        # Distribucion de calificaciones
+        todas_calificaciones = []
+        for alumno in alumnos_data:
+            todas_calificaciones.extend(alumno["calificaciones"])
+        
+        rangos = {"0-59": 0, "60-69": 0, "70-79": 0, "80-89": 0, "90-100": 0}
+        for c in todas_calificaciones:
+            if c < 60:
+                rangos["0-59"] += 1
+            elif c < 70:
+                rangos["60-69"] += 1
+            elif c < 80:
+                rangos["70-79"] += 1
+            elif c < 90:
+                rangos["80-89"] += 1
+            else:
+                rangos["90-100"] += 1
+        
+        # Matriz de calificaciones (alumno x tarea)
+        matriz_calificaciones = []
+        for alumno in alumnos_data:
+            fila = []
+            for tarea in tareas:
+                entrega = db.entregas.find_one({
+                    "tarea_id": tarea["_id"],
+                    "alumno_id": ObjectId(alumno["alumno_id"])
+                })
+                fila.append(entrega.get("calificacion") if entrega else None)
+            matriz_calificaciones.append(fila)
+        
+        return jsonify({
+            "exito": True,
+            "equipo": {
+                "id": str(equipo["_id"]),
+                "nombre": equipo.get("nombre", "Equipo sin nombre")
+            },
+            "alumnos": alumnos_data,
+            "tareas": tareas_data,
+            "distribucion": rangos,
+            "total_calificaciones": len(todas_calificaciones),
+            "matriz_calificaciones": matriz_calificaciones,
+            "total_alumnos": len(alumnos_data)
+        })
+        
+    except Exception as error:
+        print(f"Error en obtener_datos_vizualizacion: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 8. DUALES
+# ============================================
+
+def calcular_estado_dual(dual):
+    asignaciones = dual.get('asignaciones', [])
+    if not asignaciones:
+        return 'pendiente'
+    
+    total_asignaciones = len(asignaciones)
+    firmadas = sum(1 for a in asignaciones if a.get('firmado', False))
+    fecha_fin = dual.get('fecha_fin')
+    
+    if fecha_fin and fecha_fin < datetime.now():
+        return 'inactivo'
+    if firmadas == total_asignaciones and total_asignaciones > 0:
+        return 'activo'
+    return 'pendiente'
+
+@app.route('/api/duales/crear', methods=['POST'])
+def crear_dual():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        alumno_email = datos.get('alumno_email')
+        alumno = None
+        if alumno_email:
+            alumno = db.usuarios.find_one({"email": alumno_email.lower()})
+            if not alumno:
+                return jsonify({"exito": False, "mensaje": "El correo del alumno no está registrado"}), 400
+        
+        if not datos.get('titulo') or not datos.get('empresa'):
+            return jsonify({"exito": False, "mensaje": "Título y empresa son obligatorios"}), 400
+        
+        nuevo_dual = {
+            "usuario_id": ObjectId(usuario_id),
+            "alumno_id": ObjectId(alumno["_id"]) if alumno else None,
+            "alumno_email": alumno_email,
+            "titulo": datos.get('titulo'),
+            "empresa": datos.get('empresa'),
+            "descripcion": datos.get('descripcion', ''),
+            "cuatrimestre": datos.get('cuatrimestre'),
+            "curso": datos.get('curso'),
+            "carrera": datos.get('carrera'),
+            "fecha_inicio": datetime.strptime(datos.get('fecha_inicio'), '%Y-%m-%d') if datos.get('fecha_inicio') else None,
+            "fecha_fin": datetime.strptime(datos.get('fecha_fin'), '%Y-%m-%d') if datos.get('fecha_fin') else None,
+            "horas": int(datos.get('horas', 0)),
+            "tutor": datos.get('tutor', ''),
+            "asignaciones": datos.get('asignaciones', []),
+            "fecha_creacion": datetime.now()
+        }
+        resultado = db.duales.insert_one(nuevo_dual)
+        return jsonify({"exito": True, "mensaje": "Dual registrado correctamente", "dual_id": str(resultado.inserted_id)})
+    except Exception as error:
+        print(f"Error en crear_dual: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/duales/<string:usuario_id>', methods=['GET'])
+def listar_duales(usuario_id):
+    try:
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        cursor = db.duales.find({
+            "$or": [
+                {"usuario_id": ObjectId(usuario_id)},
+                {"alumno_id": ObjectId(usuario_id)},
+                {"asignaciones.maestro_email": usuario['email']}
+            ]
+        }).sort("fecha_creacion", -1)
+        
+        duales = []
+        for dual in cursor:
+            estado_automatico = calcular_estado_dual(dual)
+            alumno_info = None
+            if dual.get("alumno_id"):
+                alumno = db.usuarios.find_one({"_id": dual["alumno_id"]})
+                if alumno:
+                    alumno_info = {"_id": str(alumno["_id"]), "nombre": alumno["nombre"], "email": alumno["email"]}
+            elif dual.get("alumno_email"):
+                alumno = db.usuarios.find_one({"email": dual["alumno_email"]})
+                if alumno:
+                    alumno_info = {"_id": str(alumno["_id"]), "nombre": alumno["nombre"], "email": alumno["email"]}
+            
+            duales.append({
+                "_id": str(dual["_id"]),
+                "usuario_id": str(dual["usuario_id"]),
+                "titulo": dual.get("titulo", ""),
+                "empresa": dual.get("empresa", ""),
+                "descripcion": dual.get("descripcion", ""),
+                "cuatrimestre": dual.get("cuatrimestre"),
+                "curso": dual.get("curso"),
+                "carrera": dual.get("carrera"),
+                "fecha_inicio": dual["fecha_inicio"].strftime('%Y-%m-%d') if dual.get("fecha_inicio") else None,
+                "fecha_fin": dual["fecha_fin"].strftime('%Y-%m-%d') if dual.get("fecha_fin") else None,
+                "horas": dual.get("horas", 0),
+                "tutor": dual.get("tutor", ""),
+                "estado": estado_automatico,
+                "fecha_creacion": dual["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if dual.get("fecha_creacion") else None,
+                "asignaciones": dual.get("asignaciones", []),
+                "alumno": alumno_info
+            })
+        
+        return jsonify({"exito": True, "duales": duales})
+    except Exception as error:
+        print(f"Error en listar_duales: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/duales/detalle/<string:dual_id>', methods=['GET'])
+def detalle_dual(dual_id):
+    try:
+        dual = db.duales.find_one({"_id": ObjectId(dual_id)})
+        if not dual:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        
+        estado_automatico = calcular_estado_dual(dual)
+        dual_data = {
+            "_id": str(dual["_id"]),
+            "usuario_id": str(dual["usuario_id"]),
+            "titulo": dual.get("titulo", ""),
+            "empresa": dual.get("empresa", ""),
+            "descripcion": dual.get("descripcion", ""),
+            "cuatrimestre": dual.get("cuatrimestre"),
+            "curso": dual.get("curso"),
+            "carrera": dual.get("carrera"),
+            "fecha_inicio": dual["fecha_inicio"].strftime('%Y-%m-%d') if dual.get("fecha_inicio") else None,
+            "fecha_fin": dual["fecha_fin"].strftime('%Y-%m-%d') if dual.get("fecha_fin") else None,
+            "horas": dual.get("horas", 0),
+            "tutor": dual.get("tutor", ""),
+            "estado": estado_automatico,
+            "fecha_creacion": dual["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if dual.get("fecha_creacion") else None,
+            "asignaciones": dual.get("asignaciones", [])
+        }
+        
+        if dual.get("alumno_id"):
+            alumno = db.usuarios.find_one({"_id": dual["alumno_id"]})
+            if alumno:
+                dual_data["alumno"] = {"_id": str(alumno["_id"]), "nombre": alumno["nombre"], "email": alumno["email"]}
+        elif dual.get("alumno_email"):
+            alumno = db.usuarios.find_one({"email": dual["alumno_email"]})
+            if alumno:
+                dual_data["alumno"] = {"_id": str(alumno["_id"]), "nombre": alumno["nombre"], "email": alumno["email"]}
+        
+        return jsonify({"exito": True, "dual": dual_data})
+    except Exception as error:
+        print(f"Error en detalle_dual: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/duales/actualizar/<string:dual_id>', methods=['PUT'])
+def actualizar_dual(dual_id):
+    try:
+        datos = request.json
+        dual_existente = db.duales.find_one({"_id": ObjectId(dual_id)})
+        if not dual_existente:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        
+        actualizacion = {}
+        campos_permitidos = ["titulo", "empresa", "descripcion", "cuatrimestre", "curso", "carrera", "horas", "tutor", "asignaciones", "alumno_email"]
+        for campo in campos_permitidos:
+            if campo in datos:
+                actualizacion[campo] = datos[campo]
+        
+        if "fecha_inicio" in datos and datos["fecha_inicio"]:
+            actualizacion["fecha_inicio"] = datetime.strptime(datos["fecha_inicio"], '%Y-%m-%d')
+        if "fecha_fin" in datos and datos["fecha_fin"]:
+            actualizacion["fecha_fin"] = datetime.strptime(datos["fecha_fin"], '%Y-%m-%d')
+        
+        if "alumno_email" in actualizacion:
+            alumno = db.usuarios.find_one({"email": actualizacion["alumno_email"].lower()})
+            if alumno:
+                actualizacion["alumno_id"] = alumno["_id"]
+            else:
+                return jsonify({"exito": False, "mensaje": "El correo del alumno no está registrado"}), 400
+        
+        if actualizacion:
+            db.duales.update_one({"_id": ObjectId(dual_id)}, {"$set": actualizacion})
+        
+        return jsonify({"exito": True, "mensaje": "Dual actualizado correctamente"})
+    except Exception as error:
+        print(f"Error en actualizar_dual: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/duales/eliminar/<string:dual_id>', methods=['DELETE'])
+def eliminar_dual(dual_id):
+    try:
+        resultado = db.duales.delete_one({"_id": ObjectId(dual_id)})
+        if resultado.deleted_count == 0:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        return jsonify({"exito": True, "mensaje": "Dual eliminado correctamente"})
+    except Exception as error:
+        print(f"Error en eliminar_dual: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# FIRMA POR CÓDIGO DE EMAIL (DUALES)
+# ============================================
+
+@app.route('/api/duales/solicitar-codigo-firma', methods=['POST'])
+def solicitar_codigo_firma():
+    """Genera un código de 6 dígitos y lo envía al correo del maestro."""
+    try:
+        datos = request.json
+        dual_id = datos.get('dual_id')
+        asignacion_index = datos.get('asignacion_index')
+        usuario_id = datos.get('usuario_id')
+        
+        if not dual_id or asignacion_index is None or not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Datos incompletos"}), 400
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        dual = db.duales.find_one({"_id": ObjectId(dual_id)})
+        if not dual:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        
+        asignaciones = dual.get('asignaciones', [])
+        if asignacion_index >= len(asignaciones):
+            return jsonify({"exito": False, "mensaje": "Asignación no encontrada"}), 404
+        
+        asignacion = asignaciones[asignacion_index]
+        
+        if asignacion.get('maestro_email') != usuario['email'] and str(dual['usuario_id']) != usuario_id:
+            return jsonify({"exito": False, "mensaje": "No tienes permiso para firmar"}), 403
+        
+        if asignacion.get('firmado'):
+            return jsonify({"exito": False, "mensaje": "Esta asignación ya está firmada"}), 400
+        
+        # Generar código
+        codigo = ''.join(random.choices(string.digits, k=6))
+        expira_en = datetime.now() + timedelta(minutes=10)
+        
+        # Eliminar códigos anteriores
+        db.codigos_firma.delete_many({
+            "usuario_id": ObjectId(usuario_id),
+            "dual_id": ObjectId(dual_id),
+            "asignacion_index": asignacion_index
+        })
+        
+        # Guardar nuevo código
+        db.codigos_firma.insert_one({
+            "usuario_id": ObjectId(usuario_id),
+            "dual_id": ObjectId(dual_id),
+            "asignacion_index": asignacion_index,
+            "codigo": codigo,
+            "fecha_creacion": datetime.now(),
+            "expira_en": expira_en,
+            "usado": False
+        })
+        
+        # Enviar por email
+        enviado = enviar_codigo_email(
+            destinatario=usuario['email'],
+            codigo=codigo,
+            nombre_usuario=usuario['nombre']
+        )
+        
+        if not enviado:
+            return jsonify({
+                "exito": False,
+                "mensaje": "No se pudo enviar el código. Contacta al administrador."
+            }), 500
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": f"Código enviado a {usuario['email']}. Válido por 10 minutos."
+        })
+        
+    except Exception as error:
+        print(f"❌ Error en solicitar_codigo_firma: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/duales/verificar-codigo-firma', methods=['POST'])
+def verificar_codigo_firma():
+    """Valida código + contraseña y registra la firma."""
+    try:
+        datos = request.json
+        dual_id = datos.get('dual_id')
+        asignacion_index = datos.get('asignacion_index')
+        usuario_id = datos.get('usuario_id')
+        codigo_ingresado = datos.get('codigo', '').strip()
+        password = datos.get('password', '')
+        
+        if not dual_id or asignacion_index is None or not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Datos incompletos"}), 400
+        
+        if not codigo_ingresado or not password:
+            return jsonify({"exito": False, "mensaje": "Código y contraseña son obligatorios"}), 400
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        # Validar contraseña
+        if usuario['password'] != password:
+            return jsonify({"exito": False, "mensaje": "Contraseña incorrecta"}), 401
+        
+        # Buscar código
+        registro_codigo = db.codigos_firma.find_one({
+            "usuario_id": ObjectId(usuario_id),
+            "dual_id": ObjectId(dual_id),
+            "asignacion_index": asignacion_index,
+            "codigo": codigo_ingresado,
+            "usado": False
+        })
+        
+        if not registro_codigo:
+            return jsonify({"exito": False, "mensaje": "Código inválido o ya usado"}), 400
+        
+        # Verificar expiración
+        if datetime.now() > registro_codigo['expira_en']:
+            db.codigos_firma.delete_one({"_id": registro_codigo['_id']})
+            return jsonify({"exito": False, "mensaje": "El código ha expirado. Solicita uno nuevo."}), 400
+        
+        # Buscar dual
+        dual = db.duales.find_one({"_id": ObjectId(dual_id)})
+        if not dual:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        
+        # Registrar firma con timestamp
+        asignaciones = dual.get('asignaciones', [])
+        asignaciones[asignacion_index]['firmado'] = True
+        asignaciones[asignacion_index]['metodo_firma'] = 'codigo_email'
+        asignaciones[asignacion_index]['fecha_firma'] = datetime.now().isoformat()
+        asignaciones[asignacion_index]['ip_firma'] = request.remote_addr
+        asignaciones[asignacion_index]['firmado_por'] = usuario['email']
+        
+        db.duales.update_one(
+            {"_id": ObjectId(dual_id)},
+            {"$set": {"asignaciones": asignaciones}}
+        )
+        
+        # Marcar código como usado
+        db.codigos_firma.update_one(
+            {"_id": registro_codigo['_id']},
+            {"$set": {"usado": True, "fecha_uso": datetime.now()}}
+        )
+        
+        registrar_actividad(usuario_id, "firma_dual", f"Firmó dual {dual_id} con código de email")
+        print(f" Firma registrada: {usuario['email']} → dual {dual_id}")
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": "Firma registrada correctamente"
+        })
+        
+    except Exception as error:
+        print(f" Error en verificar_codigo_firma: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+@app.route('/api/duales/firmar', methods=['POST'])
+def firmar_dual():
+    try:
+        datos = request.json
+        dual_id = datos.get('dual_id')
+        asignacion_index = datos.get('asignacion_index')
+        usuario_id = datos.get('usuario_id')
+        firma = datos.get('firma')
+        
+        if not dual_id or asignacion_index is None or not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Datos incompletos"}), 400
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        dual = db.duales.find_one({"_id": ObjectId(dual_id)})
+        if not dual:
+            return jsonify({"exito": False, "mensaje": "Dual no encontrado"}), 404
+        
+        asignaciones = dual.get('asignaciones', [])
+        if asignacion_index >= len(asignaciones):
+            return jsonify({"exito": False, "mensaje": "Asignación no encontrada"}), 404
+        
+        asignacion = asignaciones[asignacion_index]
+        
+        if asignacion.get('maestro_email') != usuario['email'] and str(dual['usuario_id']) != usuario_id:
+            return jsonify({"exito": False, "mensaje": "No tienes permiso para firmar este dual"}), 403
+        
+        asignaciones[asignacion_index]['firmado'] = True
+        asignaciones[asignacion_index]['firma_data'] = firma
+        asignaciones[asignacion_index]['fecha_firma'] = datetime.now().isoformat()
+        
+        db.duales.update_one({"_id": ObjectId(dual_id)}, {"$set": {"asignaciones": asignaciones}})
+        return jsonify({"exito": True, "mensaje": "Firma registrada correctamente"})
+    except Exception as error:
+        print(f"❌ Error en firmar_dual: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 9. ESTADÍAS
+# ============================================
+
+@app.route('/api/estadias/crear', methods=['POST'])
+def crear_estadia():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        if not datos.get('nombre') or not datos.get('empresa'):
+            return jsonify({"exito": False, "mensaje": "Nombre y empresa son obligatorios"}), 400
+        
+        nombre_completo = f"{datos.get('nombre', '').strip()} {datos.get('apellidos', '').strip()}".strip()
+        
+        # ✅ NUEVO: buscar el maestro por ID
+        maestro_id = datos.get('maestro_id')
+        maestro = None
+        if maestro_id:
+            try:
+                maestro = db.usuarios.find_one({
+                    "_id": ObjectId(maestro_id),
+                    "rol": "maestro"
+                })
+            except:
+                maestro = None
+        
+        nueva_estadia = {
+            "usuario_id": ObjectId(usuario_id),
+            # ✅ NUEVO
+            "maestro_id": ObjectId(maestro_id) if maestro else None,
+            "maestro_nombre": maestro["nombre"] if maestro else datos.get('asesor_academico', '').strip(),
+            "maestro_email": maestro["email"] if maestro else None,
+            # Resto igual
+            "nombre": datos.get('nombre', '').strip(),
+            "apellidos": datos.get('apellidos', '').strip(),
+            "titulo": nombre_completo,
+            "carrera": datos.get('carrera', '').strip(),
+            "grupo": datos.get('grupo', '').strip(),
+            "empresa": datos.get('empresa', '').strip(),
+            "ubicacion": datos.get('lugar_estadia', datos.get('ubicacion', '')).strip(),
+            "asesor_academico": datos.get('asesor_academico', '').strip(),
+            "asesor_externo": datos.get('asesor_externo', '').strip(),
+            "proyecto": datos.get('proyecto', '').strip(),
+            "equipo": datos.get('equipo', '').strip(),
+            "descripcion": datos.get('descripcion', '').strip(),
+            "periodo": datos.get('periodo', '').strip(),
+            "fecha_inicio": datetime.strptime(datos.get('fecha_inicio'), '%Y-%m-%d') if datos.get('fecha_inicio') else None,
+            "fecha_fin": datetime.strptime(datos.get('fecha_fin'), '%Y-%m-%d') if datos.get('fecha_fin') else None,
+            "horas": int(datos.get('horas', 0)) if datos.get('horas') else 0,
+            "estado": "pendiente",
+            "fecha_creacion": datetime.now()
+        }
+        
+        resultado = db.estadias.insert_one(nueva_estadia)
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": "Estadía registrada correctamente",
+            "estadia_id": str(resultado.inserted_id)
+        })
+    except Exception as error:
+        print(f"Error en crear_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/estadias/<string:usuario_id>', methods=['GET'])
+def listar_estadias(usuario_id):
+    try:
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+        
+        estadias = []
+        
+        if usuario['rol'] == 'maestro':
+            equipos = list(db.equipos.find({"lider_id": ObjectId(usuario_id)}))
+            alumnos_ids = []
+            for eq in equipos:
+                for m in eq.get("miembros", []):
+                    if m not in alumnos_ids:
+                        alumnos_ids.append(m)
+            
+            # ✅ Unir ambas fuentes con $or
+            cursor = db.estadias.find({
+                "$or": [
+                    {"maestro_id": ObjectId(usuario_id)},
+                    {"usuario_id": {"$in": alumnos_ids}}
+                ]
+            }).sort("fecha_creacion", -1)
+        else:
+            cursor = db.estadias.find({
+                "usuario_id": ObjectId(usuario_id)
+            }).sort("fecha_creacion", -1)
+        
+        for estadia in cursor:
+            alumno_creador = db.usuarios.find_one({"_id": estadia["usuario_id"]})
+            
+            estadias.append({
+                "_id": str(estadia["_id"]),
+                "usuario_id": str(estadia["usuario_id"]),
+                "alumno_creador_nombre": alumno_creador["nombre"] if alumno_creador else "Desconocido",
+                "alumno_creador_email": alumno_creador["email"] if alumno_creador else "",
+                # ✅ NUEVO
+                "maestro_id": str(estadia["maestro_id"]) if estadia.get("maestro_id") else None,
+                "maestro_nombre": estadia.get("maestro_nombre", ""),
+                "maestro_email": estadia.get("maestro_email", ""),
+                # Resto igual
+                "nombre": estadia.get("nombre", ""),
+                "apellidos": estadia.get("apellidos", ""),
+                "titulo": estadia.get("titulo", ""),
+                "carrera": estadia.get("carrera", ""),
+                "grupo": estadia.get("grupo", ""),
+                "empresa": estadia.get("empresa", ""),
+                "ubicacion": estadia.get("ubicacion", ""),
+                "asesor_academico": estadia.get("asesor_academico", ""),
+                "asesor_externo": estadia.get("asesor_externo", ""),
+                "proyecto": estadia.get("proyecto", ""),
+                "equipo": estadia.get("equipo", ""),
+                "descripcion": estadia.get("descripcion", ""),
+                "periodo": estadia.get("periodo", ""),
+                "fecha_inicio": estadia["fecha_inicio"].strftime('%Y-%m-%d') if estadia.get("fecha_inicio") else None,
+                "fecha_fin": estadia["fecha_fin"].strftime('%Y-%m-%d') if estadia.get("fecha_fin") else None,
+                "horas": estadia.get("horas", 0),
+                "estado": estadia.get("estado", "pendiente"),
+                "fecha_creacion": estadia["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if estadia.get("fecha_creacion") else None
+            })
+        
+        return jsonify({"exito": True, "estadias": estadias})
+    except Exception as error:
+        print(f"Error en listar_estadias: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+    
+@app.route('/api/estadias/detalle/<string:estadia_id>', methods=['GET'])
+def detalle_estadia(estadia_id):
+    try:
+        estadia = db.estadias.find_one({"_id": ObjectId(estadia_id)})
+        if not estadia:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        
+        return jsonify({
+            "exito": True,
+            "estadia": {
+                "_id": str(estadia["_id"]),
+                "usuario_id": str(estadia["usuario_id"]),
+                "nombre": estadia.get("nombre", ""),
+                "apellidos": estadia.get("apellidos", ""),
+                "titulo": estadia.get("titulo", ""),
+                "carrera": estadia.get("carrera", ""),
+                "grupo": estadia.get("grupo", ""),
+                "empresa": estadia.get("empresa", ""),
+                "ubicacion": estadia.get("ubicacion", ""),
+                "asesor_academico": estadia.get("asesor_academico", ""),
+                "asesor_externo": estadia.get("asesor_externo", ""),
+                "proyecto": estadia.get("proyecto", ""),
+                "equipo": estadia.get("equipo", ""),
+                "descripcion": estadia.get("descripcion", ""),
+                "periodo": estadia.get("periodo", ""),
+                "fecha_inicio": estadia["fecha_inicio"].strftime('%Y-%m-%d') if estadia.get("fecha_inicio") else None,
+                "fecha_fin": estadia["fecha_fin"].strftime('%Y-%m-%d') if estadia.get("fecha_fin") else None,
+                "horas": estadia.get("horas", 0),
+                "estado": estadia.get("estado", "pendiente"),
+                "fecha_creacion": estadia["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if estadia.get("fecha_creacion") else None
+            }
+        })
+    except Exception as error:
+        print(f"Error en detalle_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/estadias/actualizar/<string:estadia_id>', methods=['PUT'])
+def actualizar_estadia(estadia_id):
+    try:
+        datos = request.json
+        
+        estadia_existente = db.estadias.find_one({"_id": ObjectId(estadia_id)})
+        if not estadia_existente:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        
+        actualizacion = {}
+        # ✅ Permitir todos los campos, incluyendo "estado"
+        campos_permitidos = [
+            "nombre", "apellidos", "carrera", "grupo",
+            "empresa", "ubicacion", "asesor_academico", "asesor_externo",
+            "proyecto", "equipo", "descripcion", "periodo",
+            "horas", "estado", "titulo"
+        ]
+        for campo in campos_permitidos:
+            if campo in datos:
+                actualizacion[campo] = datos[campo]
+        
+        # Actualizar el titulo (nombre completo) si cambia
+        if "nombre" in datos or "apellidos" in datos:
+            nombre = datos.get("nombre", estadia_existente.get("nombre", ""))
+            apellidos = datos.get("apellidos", estadia_existente.get("apellidos", ""))
+            actualizacion["titulo"] = f"{nombre} {apellidos}".strip()
+        
+        if "fecha_inicio" in datos and datos["fecha_inicio"]:
+            actualizacion["fecha_inicio"] = datetime.strptime(datos["fecha_inicio"], '%Y-%m-%d')
+        if "fecha_fin" in datos and datos["fecha_fin"]:
+            actualizacion["fecha_fin"] = datetime.strptime(datos["fecha_fin"], '%Y-%m-%d')
+        
+        actualizacion["fecha_actualizacion"] = datetime.now()
+        
+        if actualizacion:
+            db.estadias.update_one({"_id": ObjectId(estadia_id)}, {"$set": actualizacion})
+        
+        return jsonify({"exito": True, "mensaje": "Estadía actualizada correctamente"})
+    except Exception as error:
+        print(f"Error en actualizar_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/estadias/eliminar/<string:estadia_id>', methods=['DELETE'])
+def eliminar_estadia(estadia_id):
+    try:
+        resultado = db.estadias.delete_one({"_id": ObjectId(estadia_id)})
+        if resultado.deleted_count == 0:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        return jsonify({"exito": True, "mensaje": "Estadía eliminada correctamente"})
+    except Exception as error:
+        print(f"Error en eliminar_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+# ============================================
+# 15. MINUTAS
+# ============================================
+
+@app.route('/api/minutas/crear', methods=['POST'])
+def crear_minuta():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+
+        if not datos.get('asunto'):
+            return jsonify({"exito": False, "mensaje": "El asunto es obligatorio"}), 400
+
+        # Parsear fecha
+        fecha_minuta = None
+        if datos.get('fecha'):
+            try:
+                fecha_minuta = datetime.strptime(datos['fecha'], '%Y-%m-%d')
+            except:
+                fecha_minuta = datetime.now()
+        else:
+            fecha_minuta = datetime.now()
+
+        # Asistentes: lista de {nombre, firma}
+        asistentes = []
+        for a in datos.get('asistentes', []):
+            if a.get('nombre', '').strip():
+                asistentes.append({
+                    "nombre": a.get('nombre', '').strip(),
+                    "firma": a.get('firma', '').strip() or None
+                })
+
+        # Acuerdos: lista de {agenda, acuerdo, responsable, fecha_compromiso}
+        acuerdos = []
+        for ac in datos.get('acuerdos', []):
+            if ac.get('agenda', '').strip() or ac.get('acuerdo', '').strip():
+                fecha_comp = None
+                if ac.get('fecha_compromiso'):
+                    try:
+                        fecha_comp = datetime.strptime(ac['fecha_compromiso'], '%Y-%m-%d')
+                    except:
+                        fecha_comp = None
+
+                acuerdos.append({
+                    "agenda": ac.get('agenda', '').strip(),
+                    "acuerdo": ac.get('acuerdo', '').strip(),
+                    "responsable": ac.get('responsable', '').strip(),
+                    "fecha_compromiso": fecha_comp
+                })
+
+        nueva_minuta = {
+            "usuario_id": ObjectId(usuario_id),
+            "usuario_nombre": usuario["nombre"],
+            "usuario_email": usuario["email"],
+            "usuario_rol": usuario["rol"],
+            "fecha": fecha_minuta,
+            "hora": datos.get('hora', '').strip(),
+            "area_carrera": datos.get('area_carrera', '').strip(),
+            "asunto": datos.get('asunto', '').strip(),
+            "asistentes": asistentes,
+            "acuerdos": acuerdos,
+            "fecha_creacion": datetime.now()
+        }
+
+        resultado = db.minutas.insert_one(nueva_minuta)
+
+        return jsonify({
+            "exito": True,
+            "mensaje": "Minuta creada correctamente",
+            "minuta_id": str(resultado.inserted_id)
+        })
+    except Exception as error:
+        print(f" Error en crear_minuta: {error}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/minutas/<string:usuario_id>', methods=['GET'])
+def listar_minutas(usuario_id):
+    try:
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+
+        # Alumnos y maestros ven todas las minutas que ellos crearon
+        cursor = db.minutas.find({
+            "usuario_id": ObjectId(usuario_id)
+        }).sort("fecha_creacion", -1)
+
+        minutas = []
+        for m in cursor:
+            minutas.append({
+                "_id": str(m["_id"]),
+                "usuario_id": str(m["usuario_id"]),
+                "usuario_nombre": m.get("usuario_nombre", ""),
+                "usuario_rol": m.get("usuario_rol", ""),
+                "fecha": m["fecha"].strftime('%Y-%m-%d') if m.get("fecha") else None,
+                "hora": m.get("hora", ""),
+                "area_carrera": m.get("area_carrera", ""),
+                "asunto": m.get("asunto", ""),
+                "total_asistentes": len(m.get("asistentes", [])),
+                "total_acuerdos": len(m.get("acuerdos", [])),
+                "fecha_creacion": m["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if m.get("fecha_creacion") else None
+            })
+
+        return jsonify({"exito": True, "minutas": minutas})
+    except Exception as error:
+        print(f" Error en listar_minutas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/minutas/detalle/<string:minuta_id>', methods=['GET'])
+def detalle_minuta(minuta_id):
+    try:
+        m = db.minutas.find_one({"_id": ObjectId(minuta_id)})
+        if not m:
+            return jsonify({"exito": False, "mensaje": "Minuta no encontrada"}), 404
+
+        asistentes = []
+        for a in m.get("asistentes", []):
+            asistentes.append({
+                "nombre": a.get("nombre", ""),
+                "firma": a.get("firma")
+            })
+
+        acuerdos = []
+        for ac in m.get("acuerdos", []):
+            acuerdos.append({
+                "agenda": ac.get("agenda", ""),
+                "acuerdo": ac.get("acuerdo", ""),
+                "responsable": ac.get("responsable", ""),
+                "fecha_compromiso": ac["fecha_compromiso"].strftime('%Y-%m-%d') if ac.get("fecha_compromiso") else None
+            })
+
+        return jsonify({
+            "exito": True,
+            "minuta": {
+                "_id": str(m["_id"]),
+                "usuario_id": str(m["usuario_id"]),
+                "usuario_nombre": m.get("usuario_nombre", ""),
+                "usuario_email": m.get("usuario_email", ""),
+                "usuario_rol": m.get("usuario_rol", ""),
+                "fecha": m["fecha"].strftime('%Y-%m-%d') if m.get("fecha") else None,
+                "hora": m.get("hora", ""),
+                "area_carrera": m.get("area_carrera", ""),
+                "asunto": m.get("asunto", ""),
+                "asistentes": asistentes,
+                "acuerdos": acuerdos,
+                "fecha_creacion": m["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if m.get("fecha_creacion") else None
+            }
+        })
+    except Exception as error:
+        print(f" Error en detalle_minuta: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/minutas/actualizar/<string:minuta_id>', methods=['PUT'])
+def actualizar_minuta(minuta_id):
+    try:
+        datos = request.json
+        existente = db.minutas.find_one({"_id": ObjectId(minuta_id)})
+        if not existente:
+            return jsonify({"exito": False, "mensaje": "Minuta no encontrada"}), 404
+
+        actualizacion = {}
+
+        if "fecha" in datos and datos["fecha"]:
+            try:
+                actualizacion["fecha"] = datetime.strptime(datos["fecha"], '%Y-%m-%d')
+            except:
+                pass
+
+        for campo in ["hora", "area_carrera", "asunto"]:
+            if campo in datos:
+                actualizacion[campo] = datos[campo].strip() if isinstance(datos[campo], str) else datos[campo]
+
+        if "asistentes" in datos:
+            asistentes = []
+            for a in datos["asistentes"]:
+                if a.get('nombre', '').strip():
+                    asistentes.append({
+                        "nombre": a.get('nombre', '').strip(),
+                        "firma": a.get('firma', '').strip() or None
+                    })
+            actualizacion["asistentes"] = asistentes
+
+        if "acuerdos" in datos:
+            acuerdos = []
+            for ac in datos["acuerdos"]:
+                if ac.get('agenda', '').strip() or ac.get('acuerdo', '').strip():
+                    fecha_comp = None
+                    if ac.get('fecha_compromiso'):
+                        try:
+                            fecha_comp = datetime.strptime(ac['fecha_compromiso'], '%Y-%m-%d')
+                        except:
+                            fecha_comp = None
+                    acuerdos.append({
+                        "agenda": ac.get('agenda', '').strip(),
+                        "acuerdo": ac.get('acuerdo', '').strip(),
+                        "responsable": ac.get('responsable', '').strip(),
+                        "fecha_compromiso": fecha_comp
+                    })
+            actualizacion["acuerdos"] = acuerdos
+
+        actualizacion["fecha_actualizacion"] = datetime.now()
+
+        if actualizacion:
+            db.minutas.update_one({"_id": ObjectId(minuta_id)}, {"$set": actualizacion})
+
+        return jsonify({"exito": True, "mensaje": "Minuta actualizada correctamente"})
+    except Exception as error:
+        print(f" Error en actualizar_minuta: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/minutas/eliminar/<string:minuta_id>', methods=['DELETE'])
+def eliminar_minuta(minuta_id):
+    try:
+        resultado = db.minutas.delete_one({"_id": ObjectId(minuta_id)})
+        if resultado.deleted_count == 0:
+            return jsonify({"exito": False, "mensaje": "Minuta no encontrada"}), 404
+        return jsonify({"exito": True, "mensaje": "Minuta eliminada correctamente"})
+    except Exception as error:
+        print(f" Error en eliminar_minuta: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# NOTIFICACIONES: ESTADÍAS NUEVAS PARA EL MAESTRO
+# ============================================
+
+def filtro_estadias_maestro(usuario_id):
+    """Mismo criterio que listar_estadias: estadías asignadas al maestro
+    o creadas por alumnos de sus equipos."""
+    equipos = list(db.equipos.find({"lider_id": ObjectId(usuario_id)}))
+    alumnos_ids = []
+    for eq in equipos:
+        for m in eq.get("miembros", []):
+            if m not in alumnos_ids:
+                alumnos_ids.append(m)
+    return {
+        "$or": [
+            {"maestro_id": ObjectId(usuario_id)},
+            {"usuario_id": {"$in": alumnos_ids}}
+        ]
+    }
+
+
+@app.route('/api/estadias/nuevas/<string:usuario_id>', methods=['GET'])
+def estadias_nuevas(usuario_id):
+    try:
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            return jsonify({"exito": False, "mensaje": "Usuario no encontrado"}), 404
+
+        if usuario.get('rol') != 'maestro':
+            return jsonify({"exito": True, "total_nuevas": 0, "estadias": []})
+
+        filtro = filtro_estadias_maestro(usuario_id)
+
+        # Solo las creadas después de la última revisión del maestro
+        ultima_revision = usuario.get("ultima_revision_estadias")
+        if ultima_revision:
+            filtro = {"$and": [filtro, {"fecha_creacion": {"$gt": ultima_revision}}]}
+
+        total = db.estadias.count_documents(filtro)
+        cursor = db.estadias.find(filtro).sort("fecha_creacion", -1).limit(5)
+
+        estadias = []
+        for e in cursor:
+            alumno = db.usuarios.find_one({"_id": e["usuario_id"]})
+            estadias.append({
+                "_id": str(e["_id"]),
+                "alumno_nombre": alumno["nombre"] if alumno else "Desconocido",
+                "empresa": e.get("empresa", ""),
+                "proyecto": e.get("proyecto", ""),
+                "fecha_creacion": e["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if e.get("fecha_creacion") else None
+            })
+
+        return jsonify({"exito": True, "total_nuevas": total, "estadias": estadias})
+    except Exception as error:
+        print(f"Error en estadias_nuevas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/estadias/marcar-vistas', methods=['POST'])
+def marcar_estadias_vistas():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+
+        db.usuarios.update_one(
+            {"_id": ObjectId(usuario_id)},
+            {"$set": {"ultima_revision_estadias": datetime.now()}}
+        )
+        return jsonify({"exito": True, "mensaje": "Estadías marcadas como vistas"})
+    except Exception as error:
+        print(f"Error en marcar_estadias_vistas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# RUTA: Generar formato HTML imprimible
+# ============================================
+@app.route('/api/estadias/formato/<string:estadia_id>', methods=['GET'])
+def formato_estadia(estadia_id):
+    try:
+        estadia = db.estadias.find_one({"_id": ObjectId(estadia_id)})
+        if not estadia:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        
+        # Base URL para los logos (IP del servidor)
+        base_url = request.host_url.rstrip('/')
+        
+        # Formatear fechas
+        def formatear_fecha(fecha):
+            if not fecha:
+                return 'No especificada'
+            return fecha.strftime('%d de %B de %Y').replace(
+                'January', 'enero').replace('February', 'febrero').replace(
+                'March', 'marzo').replace('April', 'abril').replace(
+                'May', 'mayo').replace('June', 'junio').replace(
+                'July', 'julio').replace('August', 'agosto').replace(
+                'September', 'septiembre').replace('October', 'octubre').replace(
+                'November', 'noviembre').replace('December', 'diciembre')
+        
+        fecha_inicio = formatear_fecha(estadia.get('fecha_inicio'))
+        fecha_fin = formatear_fecha(estadia.get('fecha_fin'))
+        hoy = datetime.now().strftime('%d/%m/%Y')
+        
+        nombre_completo = f"{estadia.get('nombre', '')} {estadia.get('apellidos', '')}".strip()
+        equipo = estadia.get('equipo', 'Proyecto individual')
+        if not equipo or equipo.strip() == '':
+            equipo = 'Proyecto individual'
+        
+        folio = str(estadia['_id'])[-6:].upper()
+        
+        html = f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Formato de Estadía - {estadia.get('proyecto', 'Sin nombre')}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #1e293b; padding: 20px; background: white; }}
+        .formato-header {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-bottom: 1rem; border-bottom: 3px double #1e293b; margin-bottom: 1rem; }}
+        .formato-logo {{ width: 80px; height: 80px; display: flex; align-items: center; justify-content: center; }}
+        .formato-logo img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}
+        .logo-placeholder {{ width: 70px; height: 70px; border: 2px dashed #94a3b8; border-radius: 8px; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 9pt; color: #64748b; font-weight: 700; }}
+        .formato-titulo {{ flex: 1; text-align: center; }}
+        .formato-titulo h1 {{ font-size: 15pt; margin-bottom: 0.3rem; }}
+        .formato-subtitulo {{ font-size: 10pt; color: #64748b; font-style: italic; }}
+        .formato-info-doc {{ display: flex; justify-content: space-between; font-size: 9pt; color: #475569; margin-bottom: 1.2rem; padding: 0.5rem 0.8rem; background: #f8fafc; border-radius: 6px; }}
+        .formato-seccion {{ margin-bottom: 1.2rem; }}
+        .formato-seccion-titulo {{ font-size: 11pt; background: #e2e8f0; padding: 6px 10px; margin-bottom: 0.6rem; border-left: 4px solid #667eea; }}
+        .formato-tabla {{ width: 100%; border-collapse: collapse; font-size: 10pt; }}
+        .formato-tabla td {{ border: 1px solid #cbd5e1; padding: 8px 10px; vertical-align: top; }}
+        .formato-label {{ background: #f1f5f9; font-weight: 700; color: #334155; width: 20%; text-transform: uppercase; font-size: 8.5pt; }}
+        .formato-valor {{ width: 30%; }}
+        .formato-descripcion {{ white-space: pre-wrap; line-height: 1.5; min-height: 50px; }}
+        .formato-firmas {{ display: flex; justify-content: space-around; gap: 1.5rem; margin-top: 3rem; }}
+        .formato-firma {{ flex: 1; text-align: center; }}
+        .firma-linea {{ border-top: 1px solid #1e293b; margin-bottom: 0.4rem; height: 40px; }}
+        .formato-firma p {{ font-size: 9pt; }}
+        .firma-rol {{ font-size: 8pt; color: #64748b; font-style: italic; }}
+        .formato-pie {{ margin-top: 2rem; padding-top: 0.8rem; border-top: 1px solid #cbd5e1; text-align: center; font-size: 8pt; color: #94a3b8; }}
+    </style>
+</head>
+<body>
+    <div class="formato-pagina">
+        <header class="formato-header">
+            <div class="formato-logo">
+                <img src="{base_url}/img/logo_escuela.png" 
+                     onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;logo-placeholder&quot;>LOGO<br>ESCUELA</div>';" />
+            </div>
+            <div class="formato-titulo">
+                <h1>FORMATO DE ESTADÍA PROFESIONAL</h1>
+                <p class="formato-subtitulo">Registro y Control de Estadías</p>
+            </div>
+            <div class="formato-logo">
+                <img src="{base_url}/img/logo_tecnm.png" 
+                     onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;logo-placeholder&quot;>LOGO<br>TECNM</div>';" />
+            </div>
+        </header>
+
+        <div class="formato-info-doc">
+            <span><strong>Folio:</strong> EST-{folio}</span>
+            <span><strong>Fecha de emisión:</strong> {hoy}</span>
+        </div>
+
+        <section class="formato-seccion">
+            <h2 class="formato-seccion-titulo">1. DATOS DEL ALUMNO</h2>
+            <table class="formato-tabla">
+                <tr>
+                    <td class="formato-label">Nombre completo</td>
+                    <td class="formato-valor">{nombre_completo or 'No especificado'}</td>
+                    <td class="formato-label">Grupo</td>
+                    <td class="formato-valor">{estadia.get('grupo', 'No especificado') or 'No especificado'}</td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Carrera</td>
+                    <td class="formato-valor" colspan="3">{estadia.get('carrera', 'No especificada') or 'No especificada'}</td>
+                </tr>
+            </table>
+        </section>
+
+        <section class="formato-seccion">
+            <h2 class="formato-seccion-titulo">2. EMPRESA Y ASESORES</h2>
+            <table class="formato-tabla">
+                <tr>
+                    <td class="formato-label">Empresa</td>
+                    <td class="formato-valor" colspan="3">{estadia.get('empresa', 'No especificada') or 'No especificada'}</td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Lugar</td>
+                    <td class="formato-valor" colspan="3">{estadia.get('ubicacion', 'No especificado') or 'No especificado'}</td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Asesor Académico</td>
+                    <td class="formato-valor">{estadia.get('asesor_academico', 'No especificado') or 'No especificado'}</td>
+                    <td class="formato-label">Asesor Externo</td>
+                    <td class="formato-valor">{estadia.get('asesor_externo', 'No especificado') or 'No especificado'}</td>
+                </tr>
+            </table>
+        </section>
+
+        <section class="formato-seccion">
+            <h2 class="formato-seccion-titulo">3. PROYECTO</h2>
+            <table class="formato-tabla">
+                <tr>
+                    <td class="formato-label">Proyecto</td>
+                    <td class="formato-valor" colspan="3">{estadia.get('proyecto', 'No especificado') or 'No especificado'}</td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Equipo</td>
+                    <td class="formato-valor" colspan="3">{equipo}</td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Descripción</td>
+                    <td class="formato-valor formato-descripcion" colspan="3">{estadia.get('descripcion', 'Sin descripción') or 'Sin descripción'}</td>
+                </tr>
+            </table>
+        </section>
+
+        <section class="formato-seccion">
+            <h2 class="formato-seccion-titulo">4. PERIODO Y FECHAS</h2>
+            <table class="formato-tabla">
+                <tr>
+                    <td class="formato-label">Periodo</td>
+                    <td class="formato-valor">{estadia.get('periodo', 'No especificado') or 'No especificado'}</td>
+                    <td class="formato-label">Horas</td>
+                    <td class="formato-valor">{estadia.get('horas', 0)} </td>
+                </tr>
+                <tr>
+                    <td class="formato-label">Inicio</td>
+                    <td class="formato-valor">{fecha_inicio}</td>
+                    <td class="formato-label">Término</td>
+                    <td class="formato-valor">{fecha_fin}</td>
+                </tr>
+            </table>
+        </section>
+
+        <section class="formato-firmas">
+            <div class="formato-firma">
+                <div class="firma-linea"></div>
+                <p><strong>{nombre_completo or '___________________'}</strong></p>
+                <p class="firma-rol">Alumno</p>
+            </div>
+            <div class="formato-firma">
+                <div class="firma-linea"></div>
+                <p><strong>{estadia.get('asesor_academico', '___________________') or '___________________'}</strong></p>
+                <p class="firma-rol">Asesor Académico</p>
+            </div>
+            <div class="formato-firma">
+                <div class="firma-linea"></div>
+                <p><strong>{estadia.get('asesor_externo', '___________________') or '___________________'}</strong></p>
+                <p class="firma-rol">Asesor Externo</p>
+            </div>
+        </section>
+
+        <footer class="formato-pie">
+            <p>Documento generado por <strong>Learnify</strong> · {hoy}</p>
+        </footer>
+    </div>
+</body>
+</html>
+        """
+        
+        return Response(html, mimetype='text/html')
+    except Exception as error:
+        print(f"Error en formato_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 10. VIDEOLLAMADA (JITSI MEET)
+# ============================================
+
+@app.route('/api/jitsi/crear-sala', methods=['POST'])
+def crear_sala_jitsi():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        usuario_nombre = datos.get('usuario_nombre', 'Usuario')
+        
+        if not usuario_id:
+            return jsonify({"exito": False, "mensaje": "Usuario no identificado"}), 400
+        
+        room_name = 'learnify-' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        sala_url = f'https://meet.jit.si/{room_name}'
+        
+        db.salas_jitsi.insert_one({
+            "sala_id": room_name,
+            "sala_name": room_name,
+            "sala_url": sala_url,
+            "creador_id": ObjectId(usuario_id),
+            "creador_nombre": usuario_nombre,
+            "fecha_creacion": datetime.now(),
+            "activa": True
+        })
+        
+        registrar_actividad(usuario_id, "jitsi_crear_sala", f"Sala Jitsi creada: {room_name}")
+        return jsonify({"exito": True, "sala_url": sala_url, "sala_id": room_name, "sala_name": room_name, "mensaje": "Sala creada correctamente en Jitsi Meet"})
+    except Exception as error:
+        print(f"❌ Error al crear sala Jitsi: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/jitsi/salas/<string:usuario_id>', methods=['GET'])
+def listar_salas_jitsi(usuario_id):
+    try:
+        salas = list(db.salas_jitsi.find({"creador_id": ObjectId(usuario_id), "activa": True}).sort("fecha_creacion", -1))
+        resultado = []
+        for sala in salas:
+            resultado.append({
+                "sala_id": sala.get("sala_id"),
+                "sala_name": sala.get("sala_name"),
+                "sala_url": sala.get("sala_url"),
+                "fecha_creacion": sala.get("fecha_creacion").strftime('%Y-%m-%d %H:%M:%S') if sala.get("fecha_creacion") else None
+            })
+        return jsonify({"exito": True, "salas": resultado})
+    except Exception as error:
+        print(f"❌ Error al listar salas Jitsi: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/jitsi/eliminar-sala/<string:sala_id>', methods=['DELETE'])
+def eliminar_sala_jitsi(sala_id):
+    try:
+        db.salas_jitsi.update_one({"sala_id": sala_id}, {"$set": {"activa": False}})
+        return jsonify({"exito": True, "mensaje": "Sala eliminada correctamente"})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 11. IMPORTACIÓN Y LIMPIEZA DE DATOS
+# ============================================
+
+@app.route('/api/importar/alumnos', methods=['POST'])
+def importar_alumnos():
+    try:
+        equipo_id = request.form.get('equipo_id')
+        usuario_id = request.form.get('usuario_id')
+        archivo = request.files.get('archivo')
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario or usuario['rol'] != 'maestro':
+            return jsonify({"exito": False, "mensaje": "No autorizado"}), 403
+        
+        equipo = db.equipos.find_one({"_id": ObjectId(equipo_id)})
+        if not equipo or str(equipo["lider_id"]) != usuario_id:
+            return jsonify({"exito": False, "mensaje": "No eres líder de este equipo"}), 403
+        
+        filename = archivo.filename.lower()
+        content = archivo.read().decode('utf-8')
+        
+        resultados = {"creados": 0, "ya_existentes": 0, "errores": 0, "alumnos": []}
+        
+        def procesar_alumno(nombre, email, resultados):
+            alumno = db.usuarios.find_one({"email": email})
+            if not alumno:
+                nuevo_alumno = {"nombre": nombre, "email": email, "password": "123456", "rol": "alumno", "fecha_registro": datetime.now()}
+                resultado = db.usuarios.insert_one(nuevo_alumno)
+                resultados["creados"] += 1
+                resultados["alumnos"].append({"nombre": nombre, "email": email, "creado": True})
+                return resultado.inserted_id
+            else:
+                resultados["ya_existentes"] += 1
+                resultados["alumnos"].append({"nombre": nombre, "email": email, "creado": False})
+                return alumno["_id"]
+        
+        if filename.endswith('.csv'):
+            import csv
+            import io
+            csv_reader = csv.DictReader(io.StringIO(content))
+            for row in csv_reader:
+                nombre = row.get('nombre', '').strip()
+                email = row.get('email', '').strip().lower()
+                if not nombre or not email:
+                    resultados["errores"] += 1
+                    continue
+                alumno_id = procesar_alumno(nombre, email, resultados)
+                if alumno_id:
+                    db.equipos.update_one({"_id": ObjectId(equipo_id)}, {"$addToSet": {"miembros": alumno_id}})
+        
+        elif filename.endswith('.json'):
+            import json
+            data = json.loads(content)
+            if isinstance(data, dict) and 'alumnos' in data:
+                alumnos_data = data['alumnos']
+            elif isinstance(data, list):
+                alumnos_data = data
+            else:
+                return jsonify({"exito": False, "mensaje": "Formato JSON no válido"}), 400
+            
+            for item in alumnos_data:
+                nombre = item.get('nombre', '').strip()
+                email = item.get('email', '').strip().lower()
+                if not nombre or not email:
+                    resultados["errores"] += 1
+                    continue
+                alumno_id = procesar_alumno(nombre, email, resultados)
+                if alumno_id:
+                    db.equipos.update_one({"_id": ObjectId(equipo_id)}, {"$addToSet": {"miembros": alumno_id}})
+        else:
+            return jsonify({"exito": False, "mensaje": "Formato no soportado. Usa CSV o JSON"}), 400
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": f"Importación completada: {resultados['creados']} creados, {resultados['ya_existentes']} ya existían, {resultados['errores']} errores",
+            "resultados": resultados
+        })
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+@app.route('/api/limpieza', methods=['POST'])
+def limpieza_datos():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        
+        usuario = db.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario or usuario['rol'] != 'maestro':
+            return jsonify({"exito": False, "mensaje": "No autorizado"}), 403
+        
+        resultados = {}
+        
+        resultado = db.entregas.update_many({"calificacion": {"$lt": 0}}, {"$set": {"calificacion": 0}})
+        resultados["calificaciones_negativas"] = resultado.modified_count
+        
+        resultado = db.entregas.update_many({"calificacion": {"$gt": 100}}, {"$set": {"calificacion": 100}})
+        resultados["calificaciones_altas"] = resultado.modified_count
+        
+        pipeline = [{"$group": {"_id": {"tarea_id": "$tarea_id", "alumno_id": "$alumno_id"}, "ids": {"$push": "$_id"}, "count": {"$sum": 1}}}, {"$match": {"count": {"$gt": 1}}}]
+        duplicados = list(db.entregas.aggregate(pipeline))
+        eliminados = 0
+        for dup in duplicados:
+            for _id in dup["ids"][1:]:
+                db.entregas.delete_one({"_id": _id})
+                eliminados += 1
+        resultados["entregas_duplicadas"] = eliminados
+        
+        resultado = db.entregas.update_many({"fecha_entrega": {"$exists": False}}, {"$set": {"fecha_entrega": datetime.now()}})
+        resultados["entregas_sin_fecha"] = resultado.modified_count
+        
+        return jsonify({"exito": True, "mensaje": "Limpieza completada", "resultados": resultados})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+# ============================================
+# 12. WEBSOCKET - VIDEOLLAMADA
+# ============================================
+
+@socketio.on('join_room')
+def handle_join_room(data):
+    sala_id = data.get('sala_id')
+    usuario_id = data.get('usuario_id')
+    usuario_nombre = data.get('usuario_nombre', 'Anónimo')
+    
+    if not sala_id or not usuario_id:
+        return
+    
+    join_room(sala_id)
+    sala = db.salas_videollamada.find_one({"sala_id": sala_id})
+    
+    if not sala:
+        nueva_sala = {
+            "sala_id": sala_id,
+            "fecha_creacion": datetime.now(),
+            "estado": "activa",
+            "participantes": [{"usuario_id": ObjectId(usuario_id), "nombre": usuario_nombre, "fecha_ingreso": datetime.now(), "socket_id": request.sid}]
+        }
+        db.salas_videollamada.insert_one(nueva_sala)
+        es_creador = True
+    else:
+        existe = False
+        for p in sala.get("participantes", []):
+            if str(p["usuario_id"]) == usuario_id:
+                existe = True
+                db.salas_videollamada.update_one({"sala_id": sala_id, "participantes.usuario_id": ObjectId(usuario_id)}, {"$set": {"participantes.$.socket_id": request.sid}})
+                break
+        if not existe:
+            db.salas_videollamada.update_one({"sala_id": sala_id}, {"$push": {"participantes": {"usuario_id": ObjectId(usuario_id), "nombre": usuario_nombre, "fecha_ingreso": datetime.now(), "socket_id": request.sid}}})
+        es_creador = False
+    
+    sala_actualizada = db.salas_videollamada.find_one({"sala_id": sala_id})
+    participantes = [{"usuario_id": str(p["usuario_id"]), "nombre": p["nombre"]} for p in sala_actualizada.get("participantes", [])]
+    
+    emit('participantes_actualizados', {'participantes': participantes, 'total': len(participantes)}, room=sala_id)
+    if es_creador:
+        emit('esperando_participante', {'mensaje': 'Esperando que alguien se una...'}, room=request.sid)
+    
+    print(f"📥 {usuario_nombre} se unió a la sala {sala_id} (Creador: {es_creador})")
+
+@socketio.on('signal')
+def handle_signal(data):
+    sala_id = data.get('sala_id')
+    signal = data.get('signal')
+    from_id = data.get('from_id')
+    if not sala_id or not signal:
+        return
+    emit('signal', {'signal': signal, 'from_id': from_id}, room=sala_id, skip_sid=request.sid)
+
+@socketio.on('leave_room')
+def handle_leave_room(data):
+    sala_id = data.get('sala_id')
+    usuario_id = data.get('usuario_id')
+    if not sala_id or not usuario_id:
+        return
+    
+    leave_room(sala_id)
+    db.salas_videollamada.update_one({"sala_id": sala_id}, {"$pull": {"participantes": {"usuario_id": ObjectId(usuario_id)}}})
+    
+    sala = db.salas_videollamada.find_one({"sala_id": sala_id})
+    if sala and len(sala.get("participantes", [])) == 0:
+        db.salas_videollamada.delete_one({"sala_id": sala_id})
+        emit('sala_cerrada', {'mensaje': 'La sala se ha cerrado'}, room=sala_id)
+    else:
+        participantes = [{"usuario_id": str(p["usuario_id"]), "nombre": p["nombre"]} for p in sala.get("participantes", [])]
+        emit('participantes_actualizados', {'participantes': participantes, 'total': len(participantes)}, room=sala_id)
+    
+    print(f"📤 Usuario {usuario_id} salió de la sala {sala_id}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    salas = db.salas_videollamada.find({"participantes.socket_id": request.sid})
+    for sala in salas:
+        sala_id = sala["sala_id"]
+        db.salas_videollamada.update_one({"sala_id": sala_id}, {"$pull": {"participantes": {"socket_id": request.sid}}})
+        sala_actualizada = db.salas_videollamada.find_one({"sala_id": sala_id})
+        if sala_actualizada and len(sala_actualizada.get("participantes", [])) == 0:
+            db.salas_videollamada.delete_one({"sala_id": sala_id})
+        else:
+            participantes = [{"usuario_id": str(p["usuario_id"]), "nombre": p["nombre"]} for p in sala_actualizada.get("participantes", [])]
+            emit('participantes_actualizados', {'participantes': participantes, 'total': len(participantes)}, room=sala_id)
+# ============================================
+# 13. REGISTRO DE HORAS Y ACTIVIDADES
+# ============================================
+
+@app.route('/api/estadias/<string:estadia_id>/registros', methods=['POST'])
+def crear_registro_horas(estadia_id):
+    try:
+        datos = request.json
+        alumno_id = datos.get('alumno_id')
+        
+        if not alumno_id:
+            return jsonify({"exito": False, "mensaje": "Alumno no identificado"}), 400
+        
+        estadia = db.estadias.find_one({"_id": ObjectId(estadia_id)})
+        if not estadia:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        
+        if str(estadia["usuario_id"]) != alumno_id:
+            return jsonify({"exito": False, "mensaje": "No tienes permiso"}), 403
+        
+        if not datos.get('horas') or not datos.get('actividad'):
+            return jsonify({"exito": False, "mensaje": "Horas y actividad son obligatorios"}), 400
+        
+        try:
+            horas = float(datos.get('horas', 0))
+        except:
+            return jsonify({"exito": False, "mensaje": "Las horas deben ser un número"}), 400
+        
+        if horas <= 0 or horas > 24:
+            return jsonify({"exito": False, "mensaje": "Las horas deben estar entre 0.5 y 24"}), 400
+        
+        nuevo_registro = {
+            "estadia_id": ObjectId(estadia_id),
+            "alumno_id": ObjectId(alumno_id),
+            "fecha": datetime.strptime(datos.get('fecha'), '%Y-%m-%d') if datos.get('fecha') else datetime.now(),
+            "horas": horas,
+            "actividad": datos.get('actividad', '').strip(),
+            "descripcion": datos.get('descripcion', '').strip(),
+            "fecha_creacion": datetime.now()
+        }
+        
+        resultado = db.registros_horas.insert_one(nuevo_registro)
+        registrar_actividad(alumno_id, "registro_horas", f"Registró {horas}h en estadía {estadia_id}")
+        
+        return jsonify({
+            "exito": True,
+            "mensaje": "Registro creado correctamente",
+            "registro_id": str(resultado.inserted_id)
+        })
+    except Exception as error:
+        print(f"Error en crear_registro_horas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/estadias/<string:estadia_id>/registros', methods=['GET'])
+def listar_registros_horas(estadia_id):
+    try:
+        registros = list(db.registros_horas.find({
+            "estadia_id": ObjectId(estadia_id)
+        }).sort("fecha", -1))
+        
+        total_horas = sum(r.get("horas", 0) for r in registros)
+        
+        resultado = []
+        for r in registros:
+            resultado.append({
+                "_id": str(r["_id"]),
+                "estadia_id": str(r["estadia_id"]),
+                "alumno_id": str(r["alumno_id"]),
+                "fecha": r["fecha"].strftime('%Y-%m-%d') if r.get("fecha") else None,
+                "horas": r.get("horas", 0),
+                "actividad": r.get("actividad", ""),
+                "descripcion": r.get("descripcion", ""),
+                "fecha_creacion": r["fecha_creacion"].strftime('%Y-%m-%d %H:%M:%S') if r.get("fecha_creacion") else None
+            })
+        
+        return jsonify({
+            "exito": True,
+            "registros": resultado,
+            "total_horas": round(total_horas, 1),
+            "total_registros": len(resultado)
+        })
+    except Exception as error:
+        print(f"Error en listar_registros_horas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/estadias/<string:estadia_id>/progreso', methods=['GET'])
+def progreso_estadia(estadia_id):
+    try:
+        estadia = db.estadias.find_one({"_id": ObjectId(estadia_id)})
+        if not estadia:
+            return jsonify({"exito": False, "mensaje": "Estadía no encontrada"}), 404
+        
+        registros = list(db.registros_horas.find({"estadia_id": ObjectId(estadia_id)}))
+        total_horas = sum(r.get("horas", 0) for r in registros)
+        horas_requeridas = estadia.get("horas", 0)
+        porcentaje = (total_horas / horas_requeridas * 100) if horas_requeridas > 0 else 0
+        
+        return jsonify({
+            "exito": True,
+            "total_horas": round(total_horas, 1),
+            "horas_requeridas": horas_requeridas,
+            "porcentaje": round(porcentaje, 1),
+            "total_registros": len(registros)
+        })
+    except Exception as error:
+        print(f"Error en progreso_estadia: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/registros/<string:registro_id>', methods=['PUT'])
+def actualizar_registro_horas(registro_id):
+    try:
+        datos = request.json
+        actualizacion = {}
+        
+        if 'horas' in datos:
+            try:
+                horas = float(datos['horas'])
+                if horas <= 0 or horas > 24:
+                    return jsonify({"exito": False, "mensaje": "Las horas deben estar entre 0.5 y 24"}), 400
+                actualizacion['horas'] = horas
+            except:
+                return jsonify({"exito": False, "mensaje": "Horas inválidas"}), 400
+        
+        if 'actividad' in datos:
+            actualizacion['actividad'] = datos['actividad'].strip()
+        if 'descripcion' in datos:
+            actualizacion['descripcion'] = datos['descripcion'].strip()
+        if 'fecha' in datos and datos['fecha']:
+            actualizacion['fecha'] = datetime.strptime(datos['fecha'], '%Y-%m-%d')
+        
+        if actualizacion:
+            actualizacion['fecha_actualizacion'] = datetime.now()
+            db.registros_horas.update_one(
+                {"_id": ObjectId(registro_id)},
+                {"$set": actualizacion}
+            )
+        
+        return jsonify({"exito": True, "mensaje": "Registro actualizado correctamente"})
+    except Exception as error:
+        print(f"Error en actualizar_registro_horas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/registros/<string:registro_id>', methods=['DELETE'])
+def eliminar_registro_horas(registro_id):
+    try:
+        resultado = db.registros_horas.delete_one({"_id": ObjectId(registro_id)})
+        if resultado.deleted_count == 0:
+            return jsonify({"exito": False, "mensaje": "Registro no encontrado"}), 404
+        return jsonify({"exito": True, "mensaje": "Registro eliminado correctamente"})
+    except Exception as error:
+        print(f"Error en eliminar_registro_horas: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+# ============================================
+# 14. BÚSQUEDA DE MAESTROS (autocompletado)
+# ============================================
+
+@app.route('/api/usuarios/maestros', methods=['GET'])
+def buscar_maestros():
+    try:
+        q = request.args.get('q', '').strip()
+        limite = int(request.args.get('limite', 10))
+        
+        filtro = {"rol": "maestro"}
+        
+        if q:
+            filtro["$or"] = [
+                {"nombre": {"$regex": q, "$options": "i"}},
+                {"email": {"$regex": q, "$options": "i"}}
+            ]
+        
+        maestros = list(
+            db.usuarios.find(filtro, {"nombre": 1, "email": 1})
+            .limit(limite)
+        )
+        
+        resultado = [{
+            "_id": str(m["_id"]),
+            "nombre": m["nombre"],
+            "email": m["email"]
+        } for m in maestros]
+        
+        return jsonify({"exito": True, "maestros": resultado})
+    except Exception as error:
+        print(f"Error en buscar_maestros: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+    
+
+# ============================================
+# 16. COMPARTIR DOCUMENTOS POR CORREO
+# ============================================
+import uuid
+
+@app.route('/api/compartir/crear', methods=['POST'])
+def crear_compartido():
+    try:
+        # 1. Recibimos el archivo PDF y los datos del formulario
+        archivo_pdf = request.files.get('pdf_file')
+        correos_str = request.form.get('correos', '')
+        tipo_documento = request.form.get('tipo_documento', 'minuta')
+        documento_id = request.form.get('documento_id')
+        creador_id = request.form.get('creador_id')
+
+        if not archivo_pdf or not correos_str:
+            return jsonify({"exito": False, "mensaje": "Faltan datos o el PDF"}), 400
+
+        correos = [c.strip() for c in correos_str.split(',') if c.strip()]
+
+        # 2. Guardamos el registro en la base de datos
+        token = uuid.uuid4().hex
+        nuevo_compartido = {
+            "tipo_documento": tipo_documento,
+            "documento_id": ObjectId(documento_id),
+            "creador_id": ObjectId(creador_id),
+            "token": token,
+            "permisos": "descargar",
+            "destinatarios": correos,
+            "fecha_creacion": datetime.now(),
+            "historial": [{"accion": "creado", "fecha": datetime.now(), "ip": request.remote_addr}]
+        }
+        db.compartidos.insert_one(nuevo_compartido)
+
+        # 3. Enviamos el correo con el PDF adjunto
+        pdf_bytes = archivo_pdf.read()
+        
+        for correo_destino in correos:
+            try:
+                msg = MIMEMultipart()
+                msg['Subject'] = f'Documento Compartido - Learnify ({tipo_documento.capitalize()})'
+                msg['From'] = f'{MAIL_FROM_NAME} <{MAIL_USER}>'
+                msg['To'] = correo_destino
+                
+                cuerpo = f"""
+                <html><body>
+                <h2>Hola,</h2>
+                <p>Se ha compartido un documento contigo desde <strong>Learnify</strong>.</p>
+                <p><strong>Tipo de documento:</strong> {tipo_documento.capitalize()}</p>
+                <p>El archivo PDF con el diseño oficial está adjunto a este correo.</p>
+                </body></html>
+                """
+                msg.attach(MIMEText(cuerpo, 'html', 'utf-8'))
+
+                adjunto = MIMEBase('application', 'pdf')
+                adjunto.set_payload(pdf_bytes)
+                encoders.encode_base64(adjunto)
+                adjunto.add_header('Content-Disposition', f'attachment; filename="documento_{tipo_documento}.pdf"')
+                msg.attach(adjunto)
+
+                with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
+                    server.starttls()
+                    server.login(MAIL_USER, MAIL_PASSWORD)
+                    server.send_message(msg)
+                
+                print(f"📧 Correo enviado a {correo_destino}")
+            except Exception as e:
+                print(f"❌ Error al enviar correo a {correo_destino}: {e}")
+
+        return jsonify({
+            "exito": True,
+            "mensaje": "Correo enviado correctamente",
+            "token": token
+        })
+
+    except Exception as error:
+        print(f"Error en crear_compartido: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+        # ============================================
+# 17. GENERAR ENLACE Y VER DOCUMENTO (PÚBLICO)
+# ============================================
+import uuid
+
+@app.route('/api/compartir/generar-enlace', methods=['POST'])
+def generar_enlace():
+    try:
+        datos = request.json
+        documento_id = datos.get('documento_id')
+        tipo_documento = datos.get('tipo_documento')
+        creador_id = datos.get('creador_id')
+        dias_expiracion = datos.get('dias_expiracion', 7)
+        permisos = datos.get('permisos', 'ver')  #  Recibimos los permisos
+        correos = datos.get('correos', [])       #  Recibimos los correos (por si acaso)
+
+        if not documento_id or not tipo_documento or not creador_id:
+            return jsonify({"exito": False, "mensaje": "Faltan datos obligatorios"}), 400
+
+        token = uuid.uuid4().hex
+        fecha_expiracion = None
+        if dias_expiracion > 0:
+            fecha_expiracion = datetime.now() + timedelta(days=dias_expiracion)
+
+        nuevo_compartido = {
+            "tipo_documento": tipo_documento,
+            "documento_id": ObjectId(documento_id),
+            "creador_id": ObjectId(creador_id),
+            "token": token,
+            "permisos": permisos,          #  Guardamos los permisos reales
+            "destinatarios": correos,      #  Guardamos los correos
+            "fecha_creacion": datetime.now(),
+            "fecha_expiracion": fecha_expiracion,
+            "historial": [{"accion": "creado", "fecha": datetime.now(), "ip": request.remote_addr}]
+        }
+        db.compartidos.insert_one(nuevo_compartido)
+
+        return jsonify({
+            "exito": True,
+            "token": token,
+            "enlace": f"{request.host_url}pages/compartido/ver_compartido.html?token={token}"
+        })
+
+    except Exception as error:
+        print(f"Error en generar_enlace: {error}")
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/compartir/validar/<string:token>', methods=['GET'])
+def validar_compartido(token):
+    try:
+        compartido = db.compartidos.find_one({"token": token})
+        if not compartido:
+            return jsonify({"exito": False, "mensaje": "Enlace no válido"}), 404
+
+        if compartido.get('fecha_expiracion') and datetime.now() > compartido['fecha_expiracion']:
+            return jsonify({"exito": False, "mensaje": "Este enlace ha expirado"}), 410
+
+        # Registrar vista en historial
+        db.compartidos.update_one(
+            {"_id": compartido["_id"]},
+            {"$push": {"historial": {"accion": "visto", "fecha": datetime.now(), "ip": request.remote_addr}}}
+        )
+
+        tipo = compartido['tipo_documento']
+        doc = None
+        if tipo == 'minuta': doc = db.minutas.find_one({"_id": compartido['documento_id']})
+        elif tipo == 'estadia': doc = db.estadias.find_one({"_id": compartido['documento_id']})
+        elif tipo == 'dual': doc = db.duales.find_one({"_id": compartido['documento_id']})
+
+        if not doc:
+            return jsonify({"exito": False, "mensaje": "El documento ya no existe"}), 404
+
+        return jsonify({
+            "exito": True,
+            "tipo_documento": tipo,
+            "documento": convertir_objectid(doc)
+        })
+
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+
+
+@app.route('/api/compartir/historial/<string:documento_id>', methods=['GET'])
+def historial_compartido(documento_id):
+    try:
+        compartidos = list(db.compartidos.find({"documento_id": ObjectId(documento_id)}))
+        historial_total = []
+        for c in compartidos:
+            for h in c.get('historial', []):
+                h['token'] = c['token']
+                h['fecha'] = h['fecha'].strftime('%Y-%m-%d %H:%M:%S')
+                historial_total.append(h)
+        
+        historial_total.sort(key=lambda x: x['fecha'], reverse=True)
+        return jsonify({"exito": True, "historial": historial_total})
+    except Exception as error:
+        return jsonify({"exito": False, "mensaje": str(error)}), 400
+    
+    #cambios para el compartido
+@app.route('/api/compartir/generar-html/<string:token>', methods=['GET'])
+def generar_html_compartido(token):
+    compartido = db.compartidos.find_one({"token": token})
+    if not compartido:
+        return "<h1>Enlace no válido</h1>", 404
+    return html_documento(compartido['tipo_documento'], compartido['documento_id'])
+
+# NUEVO: HTML del dual para que el móvil genere su PDF
+@app.route('/api/duales/formato/<string:dual_id>', methods=['GET'])
+def formato_dual(dual_id):
+    return html_documento('dual', dual_id)
+
+# Función que arma el HTML según el tipo (antes estaba dentro de generar_html_compartido)
+def html_documento(tipo, documento_id):
+    try:
+        doc = None
+        if tipo == 'minuta': doc = db.minutas.find_one({"_id": ObjectId(documento_id)})
+        elif tipo == 'estadia': doc = db.estadias.find_one({"_id": ObjectId(documento_id)})
+        elif tipo == 'dual': doc = db.duales.find_one({"_id": ObjectId(documento_id)})
+
+        if not doc: return "<h1>No encontrado</h1>", 404
+
+        base_url = request.host_url.rstrip('/')
+        
+        if tipo == 'minuta':
+            filas_asistentes = "".join([f"<tr><td>{a.get('nombre','')}</td><td>{a.get('firma','') or ''}</td></tr>" for a in doc.get('asistentes', [])])
+            filas_acuerdos = "".join([f"<tr><td>{ac.get('agenda','')}</td><td>{ac.get('acuerdo','')}</td><td>{ac.get('responsable','')}</td><td>{ac.get('fecha_compromiso').strftime('%d/%m/%Y') if ac.get('fecha_compromiso') else ''}</td></tr>" for ac in doc.get('acuerdos', [])])
+            
+            return f"""
+            <html><head><style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; padding: 20px; color: #1e293b; }}
+                .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1e293b; padding-bottom: 10px; margin-bottom: 20px; }}
+                .header img {{ max-height: 70px; }}
+                .titulo-centro {{ text-align: center; flex: 1; }}
+                .titulo-centro h1 {{ margin: 0; font-size: 18pt; }}
+                table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 10pt; }}
+                th, td {{ border: 1px solid #cbd5e1; padding: 8px; text-align: left; }}
+                th {{ background: #f1f5f9; }}
+                .seccion-titulo {{ background: #e2e8f0; padding: 6px 10px; font-weight: bold; border-left: 4px solid #667eea; margin: 15px 0 10px; }}
+            </style></head><body>
+            <div class="header">
+                <img src="{base_url}/img/logo_escuela.png" onerror="this.style.display='none'">
+                <div class="titulo-centro"><h1>MINUTA</h1><p>Registro formal de reunión</p></div>
+                <img src="{base_url}/img/logo_tecnm.png" onerror="this.style.display='none'">
+            </div>
+            <table>
+                <tr><td style="width:15%;background:#f1f5f9;"><b>FECHA:</b></td><td>{doc.get('fecha').strftime('%d/%m/%Y') if doc.get('fecha') else ''}</td><td style="width:15%;background:#f1f5f9;"><b>HORA:</b></td><td>{doc.get('hora','')}</td></tr>
+                <tr><td style="background:#f1f5f9;"><b>ÁREA:</b></td><td colspan="3">{doc.get('area_carrera','')}</td></tr>
+            </table>
+            <div class="seccion-titulo">ASUNTO</div>
+            <p style="border:1px solid #cbd5e1; padding:10px;">{doc.get('asunto','')}</p>
+            <div class="seccion-titulo">ASISTENTES</div>
+            <table><tr><th>Nombre</th><th>Firma</th></tr>{filas_asistentes}</table>
+            <div class="seccion-titulo">ACUERDOS</div>
+            <table><tr><th>Agenda</th><th>Acuerdo</th><th>Responsable</th><th>Fecha</th></tr>{filas_acuerdos}</table>
+            <p style="text-align:center; font-size:8pt; color:#94a3b8; margin-top:30px;">Documento generado por Learnify - R-COM-04</p>
+            </body></html>
+            """
+        elif tipo == 'estadia':
+            return formato_estadia(str(doc['_id']))
+        elif tipo == 'dual':
+            fecha_inicio = doc.get('fecha_inicio').strftime('%d/%m/%Y') if doc.get('fecha_inicio') else 'No especificada'
+            fecha_fin = doc.get('fecha_fin').strftime('%d/%m/%Y') if doc.get('fecha_fin') else 'No especificada'
+            hoy = datetime.now().strftime('%d/%m/%Y')
+            folio = str(doc['_id'])[-6:].upper()
+            
+            alumno_nombre = "No asignado"
+            alumno_email = doc.get('alumno_email', 'No especificado')
+            if doc.get('alumno_id'):
+                alumno = db.usuarios.find_one({"_id": doc['alumno_id']})
+                if alumno:
+                    alumno_nombre = alumno.get('nombre', 'No asignado')
+                    alumno_email = alumno.get('email', 'No especificado')
+            elif alumno_email:
+                alumno = db.usuarios.find_one({"email": alumno_email})
+                if alumno:
+                    alumno_nombre = alumno.get('nombre', 'No asignado')
+
+            filas_asignaciones = ""
+            for a in doc.get('asignaciones', []):
+                estado = "✅ FIRMADO" if a.get('firmado') else "⏳ PENDIENTE"
+                color = "#059669" if a.get('firmado') else "#d97706"
+                filas_asignaciones += f"""
+                <tr>
+                    <td>{a.get('materia', 'Sin materia')}</td>
+                    <td>{a.get('maestro_nombre', 'No asignado')}<br><small style="color:#64748b;">{a.get('maestro_email', '')}</small></td>
+                    <td style="color: {color}; font-weight: bold;">{estado}</td>
+                </tr>
+                """
+
+            return f"""
+            <html><head><style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; padding: 20px; color: #1e293b; background: white; }}
+                .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1e293b; padding-bottom: 10px; margin-bottom: 20px; }}
+                .header img {{ max-height: 70px; }}
+                .titulo-centro {{ text-align: center; flex: 1; }}
+                .titulo-centro h1 {{ margin: 0; font-size: 18pt; }}
+                .info-doc {{ display: flex; justify-content: space-between; background: #f1f5f9; padding: 10px 15px; border-radius: 6px; font-size: 10pt; margin-bottom: 20px; }}
+                .seccion-titulo {{ background: #e2e8f0; padding: 6px 10px; font-weight: bold; border-left: 4px solid #667eea; margin: 15px 0 10px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10pt; }}
+                th, td {{ border: 1px solid #cbd5e1; padding: 8px; text-align: left; }}
+                th {{ background: #f8fafc; }}
+                .firmas {{ display: flex; justify-content: space-around; margin-top: 40px; text-align: center; }}
+                .firma {{ width: 30%; }}
+                .linea-firma {{ border-top: 1px solid #1e293b; margin-bottom: 5px; height: 30px; }}
+                .firma p {{ margin: 5px 0; font-size: 10pt; }}
+            </style></head><body>
+                <div class="header">
+                    <img src="{base_url}/img/logo_escuela.png" onerror="this.style.display='none'">
+                    <div class="titulo-centro"><h1>FORMATO DE PROGRAMA DUAL</h1><p>Registro y Control</p></div>
+                    <img src="{base_url}/img/tecnm.png" onerror="this.style.display='none'">
+                </div>
+                
+                <div class="info-doc">
+                    <span><strong>Folio:</strong> DUAL-{folio}</span>
+                    <span><strong>Fecha de emisión:</strong> {hoy}</span>
+                </div>
+
+                <div class="seccion-titulo">1. DATOS DEL ALUMNO</div>
+                <table>
+                    <tr><td style="width:20%;background:#f8fafc;"><b>Nombre completo</b></td><td>{alumno_nombre}</td><td style="width:20%;background:#f8fafc;"><b>Correo</b></td><td>{alumno_email}</td></tr>
+                </table>
+
+                <div class="seccion-titulo">2. DATOS DE LA EMPRESA</div>
+                <table>
+                    <tr><td style="width:20%;background:#f8fafc;"><b>Empresa</b></td><td colspan="3">{doc.get('empresa', 'No especificada')}</td></tr>
+                    <tr><td style="background:#f8fafc;"><b>Título del proyecto</b></td><td colspan="3">{doc.get('titulo', 'No especificado')}</td></tr>
+                    <tr><td style="background:#f8fafc;"><b>Tutor</b></td><td colspan="3">{doc.get('tutor', 'No asignado')}</td></tr>
+                </table>
+
+                <div class="seccion-titulo">3. DATOS ACADÉMICOS</div>
+                <table>
+                    <tr>
+                        <td style="width:20%;background:#f8fafc;"><b>Carrera</b></td><td>{doc.get('carrera', 'No especificada')}</td>
+                        <td style="width:20%;background:#f8fafc;"><b>Cuatrimestre</b></td><td>{doc.get('cuatrimestre', 'No especificado')}</td>
+                    </tr>
+                    <tr>
+                        <td style="background:#f8fafc;"><b>Curso</b></td><td>{doc.get('curso', 'No especificado')}</td>
+                        <td style="background:#f8fafc;"><b>Horas</b></td><td>{doc.get('horas', 0)} hrs</td>
+                    </tr>
+                    <tr>
+                        <td style="background:#f8fafc;"><b>Fecha inicio</b></td><td>{fecha_inicio}</td>
+                        <td style="background:#f8fafc;"><b>Fecha término</b></td><td>{fecha_fin}</td>
+                    </tr>
+                    <tr>
+                        <td style="background:#f8fafc;"><b>Estado</b></td><td colspan="3">{doc.get('estado', 'pendiente').capitalize()}</td>
+                    </tr>
+                </table>
+
+                <div class="seccion-titulo">4. DESCRIPCIÓN DEL PROYECTO</div>
+                <table>
+                    <tr><td style="padding: 10px;">{doc.get('descripcion', 'Sin descripción')}</td></tr>
+                </table>
+
+                <div class="seccion-titulo">5. MATERIAS Y FIRMAS</div>
+                <table>
+                    <tr><th>Materia</th><th>Maestro</th><th>Estado</th></tr>
+                    {filas_asignaciones}
+                </table>
+
+                <div class="firmas">
+                    <div class="firma">
+                        <div class="linea-firma"></div>
+                        <p><strong>{alumno_nombre}</strong></p>
+                        <p>Alumno</p>
+                    </div>
+                    <div class="firma">
+                        <div class="linea-firma"></div>
+                        <p><strong>{doc.get('tutor', '___________________')}</strong></p>
+                        <p>Tutor Empresarial</p>
+                    </div>
+                    <div class="firma">
+                        <div class="linea-firma"></div>
+                        <p><strong>___________________</strong></p>
+                        <p>Coordinador Dual</p>
+                    </div>
+                </div>
+            </body></html>
+            """
+        else:
+            return "<h1>Documento listo para compartir</h1>"
+    except Exception as e:
+        return f"<h1>Error: {e}</h1>", 500
+
+
+# ============================================
+# 18. HISTORIAL DE DESCARGAS
+# ============================================
+
+@app.route('/api/historial/registrar', methods=['POST'])
+def registrar_descarga():
+    try:
+        datos = request.json
+        usuario_id = datos.get('usuario_id')
+        tipo = datos.get('tipo')  # 'Minuta', 'Estadía', 'Dual', etc.
+        referencia = datos.get('referencia', '') # Asunto o nombre del proyecto
+
+        if not usuario_id or not tipo:
+            return jsonify({"exito": False, "mensaje": "Faltan datos"}), 400
+
+        db.historial_descargas.insert_one({
+            "usuario_id": ObjectId(usuario_id),
+            "tipo": tipo,
+            "referencia": referencia,
+            "fecha": datetime.now()
+        })
+        return jsonify({"exito": True})
+    except Exception as e:
+        return jsonify({"exito": False, "mensaje": str(e)}), 400
+
+@app.route('/api/historial/<string:usuario_id>', methods=['GET'])
+def obtener_historial(usuario_id):
+    try:
+        # Traer solo los últimos 10 registros para no saturar el Dashboard
+        cursor = db.historial_descargas.find({
+            "usuario_id": ObjectId(usuario_id)
+        }).sort("fecha", -1).limit(10)
+
+        historial = []
+        for h in cursor:
+            historial.append({
+                "_id": str(h["_id"]),
+                "tipo": h.get("tipo"),
+                "referencia": h.get("referencia"),
+                "fecha": h["fecha"].strftime('%Y-%m-%d %H:%M') if h.get("fecha") else None
+            })
+        return jsonify({"exito": True, "historial": historial})
+    except Exception as e:
+        return jsonify({"exito": False, "mensaje": str(e)}), 400
+    
+
+# ============================================
+# INICIAR SERVIDOR
+# ============================================
+if __name__ == '__main__':
+    print("\n" + "="*50)
+    print("🚀 SERVIDOR INICIADO CON MONGODB + WEBSOCKET")
+    print("="*50)
+    print("📁 Base de datos: MongoDB")
+    print("📁 Archivos: GridFS")
+    print("🔌 WebSocket: Activado para videollamadas")
+    print("📹 Jitsi Meet: Integrado para videollamadas (Gratis)")
+    print("🔒 Seguridad: Bloqueo por intentos fallidos activo")
+    print("🌐 Rutas disponibles:")
+    print("   • http://localhost:5000/api/test  (para probar)")
+    print("   • http://localhost:5000/api/jitsi/crear-sala (Jitsi)")
+    print("   • http://localhost:5000/api/estado-intentos (Estado de bloqueo)")
+    print("\n🔧 Presiona CTRL+C para detener el servidor")
+    print("="*50 + "\n")
+
+
+    
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)

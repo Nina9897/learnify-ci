@@ -1,0 +1,127 @@
+<!-- ============================================
+     ARCHIVO: equipo_detalle.html
+     Vista detallada de un equipo - Diseño profesional
+     ============================================ -->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learnify | Detalle de Equipo</title>
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="../css/base.css">
+    <link rel="stylesheet" href="../css/equipo-detalle.css">
+    <link rel="stylesheet" href="../css/menu.css">
+    <link rel="stylesheet" href="../css/modal_editar_perfil.css">
+    <link rel="stylesheet" href="../css/temas_oscuro.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="menu-lateral">
+    <div class="app-container">
+        
+        <!-- ============================================ -->
+        <!-- MENÚ LATERAL                                 -->
+        <!-- ============================================ -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-graduation-cap"></i><span> Learnify</span></h2>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="../dashboard.html" class="menu-item">
+                    <i class="fas fa-chart-line"></i><span> Dashboard</span>
+                </a>
+                <a href="mis_equipos.html" class="menu-item">
+                    <i class="fas fa-users"></i><span> Mis Equipos</span>
+                </a>
+                <a href="analisis/analisis_alumnos.html" class="menu-item">
+                    <i class="fas fa-chart-pie"></i><span> Análisis</span>
+                </a>
+                <a href="duales/mis_duales.html" class="menu-item">
+                    <i class="fas fa-briefcase"></i><span> Duales</span>
+                </a>
+                <a href="estadias/mis_estadias.html" class="menu-item">
+                    <i class="fas fa-building"></i><span> Estadías</span>
+                </a>
+                  <a href="pages/minutas/mis_minutas.html" class="menu-item">
+                    <i class="fas fa-file-alt"></i><span> Minutas</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info-sidebar" id="userInfoSidebar"></div>
+
+
+                <button class="btn-cerrar-sesion" onclick="cerrarSesion()">
+                    <i class="fas fa-sign-out-alt"></i><span> Cerrar sesión</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- ============================================ -->
+        <!-- CONTENIDO PRINCIPAL                          -->
+        <!-- ============================================ -->
+        <main class="main-content">
+            <div class="page-container">
+
+                <!-- Botón volver -->
+                <div class="back-button-wrapper">
+                    <a href="mis_equipos.html" class="btn btn-outline btn-sm">
+                        <i class="fas fa-arrow-left"></i> Volver a mis equipos
+                    </a>
+                </div>
+
+                <!-- Contenedor de contenido (se llena con JS) -->
+                <div id="equipoContent">
+                    <div class="loading-state">
+                        <i class="fas fa-spinner fa-pulse"></i>
+                        <p>Cargando información del equipo...</p>
+                    </div>
+                </div>
+
+                <!-- Modal para invitar miembros (solo líder) -->
+                <div id="modalAgregar" class="modal-overlay" style="display: none;">
+                    <div class="modal-container" style="max-width: 420px;">
+                        <div class="modal-header">
+                            <h3><i class="fas fa-user-plus"></i> Invitar miembros</h3>
+                            <button class="modal-close" onclick="cerrarModal()">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <div class="modal-body">
+                            <p style="color: #64748b; margin-bottom: 1rem;">
+                                <i class="fas fa-share-alt"></i> Comparte este código con los alumnos para que se unan:
+                            </p>
+                            <div class="invite-code-box">
+                                <i class="fas fa-key"></i>
+                                <span id="equipoIdCodigo">Cargando...</span>
+                            </div>
+                            <p style="font-size: 0.85rem; color: #94a3b8; margin-top: 0.75rem;">
+                                <i class="fas fa-info-circle"></i> Los alumnos deben ir a "Mis Equipos" → "Unirse a equipo" y pegar este código.
+                            </p>
+                        </div>
+                        <div class="modal-footer" style="justify-content: center;">
+                            <button class="btn btn-primary" onclick="cerrarModal()">
+                                <i class="fas fa-check"></i> Entendido
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- SCRIPTS                                       -->
+    <!-- ============================================ -->
+    <script src="../js/menu.js"></script>
+    <script src="../js/equipo-detalle.js"></script>
+</body>
+</html>

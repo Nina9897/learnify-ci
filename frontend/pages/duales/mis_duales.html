@@ -1,0 +1,301 @@
+<!-- ============================================
+     ARCHIVO: mis_duales.html
+     Gestión de Duales (VERSIÓN COMPLETA CON FIRMA POR CÓDIGO DE EMAIL Y PDF)
+     ============================================ -->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learnify | Mis Duales</title>
+    <link rel="stylesheet" href="../../css/base.css">
+    <link rel="stylesheet" href="../../css/menu.css">
+    <link rel="stylesheet" href="../../css/duales.css">
+    <link rel="stylesheet" href="../../css/modal_editar_perfil.css">
+    <link rel="stylesheet" href="../../css/temas_oscuro.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    
+</head>
+<body class="menu-lateral">
+    <div class="app-container">
+        <!-- Menú lateral -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-graduation-cap"></i><span> Learnify</span></h2>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="../../dashboard.html" class="menu-item">
+                    <i class="fas fa-chart-line"></i><span> Dashboard</span>
+                </a>
+                <a href="../../pages/mis_equipos.html" class="menu-item">
+                    <i class="fas fa-users"></i><span> Mis Equipos</span>
+                </a>
+                <a href="../../pages/analisis/analisis_alumnos.html" class="menu-item">
+                    <i class="fas fa-chart-pie"></i><span> Análisis</span>
+                </a>
+                <a href="../../pages/duales/mis_duales.html" class="menu-item active">
+                    <i class="fas fa-briefcase"></i><span> Duales</span>
+                </a>
+                <a href="../../pages/estadias/mis_estadias.html" class="menu-item">
+                    <i class="fas fa-building"></i><span> Estadías</span>
+                </a>
+                
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info-sidebar" id="userInfoSidebar"></div>
+                <button class="btn-cerrar-sesion" onclick="cerrarSesion()">
+                    <i class="fas fa-sign-out-alt"></i><span> Cerrar sesión</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Contenido principal -->
+        <main class="main-content">
+            <div class="duales-container">
+                <!-- ========================================== -->
+                <!-- HEADER DE DUALES                          -->
+                <!-- ========================================== -->
+                <div class="header-duales">
+                    <h2><i class="fas fa-briefcase"></i> Mis Duales</h2>
+                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <!-- Botón solo visible para MAESTROS -->
+                        <button id="btnCrearDual" class="btn primario" style="display: none;">
+                            <i class="fas fa-plus-circle"></i> Registrar Dual
+                        </button>
+                    </div>
+                </div>
+
+                <div id="mensaje" class="mensaje"></div>
+
+                <div id="dualesContainer" class="duales-grid">
+                    <div class="sin-duales">
+                        <i class="fas fa-spinner fa-pulse"></i> Cargando duales...
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODAL DE CONFIRMACIÓN PARA ELIMINAR        -->
+    <!-- ========================================== -->
+    <div id="modalConfirmar" class="modal-confirmar" style="display: none;">
+        <div class="modal-confirmar-contenido">
+            <div class="modal-confirmar-header">
+                <i class="fas fa-exclamation-triangle"></i>
+                <h3>Confirmar eliminación</h3>
+            </div>
+            <div class="modal-confirmar-body">
+                <p>¿Estás seguro de que quieres eliminar este dual?</p>
+                <p class="modal-advertencia">Esta acción no se puede deshacer.</p>
+            </div>
+            <div class="modal-confirmar-footer">
+                <button id="btnCancelarEliminar" class="btn secundario">
+                    <i class="fas fa-times"></i> Cancelar
+                </button>
+                <button id="btnConfirmarEliminar" class="btn-danger">
+                    <i class="fas fa-trash-alt"></i> Eliminar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODAL DE DETALLE DEL DUAL                 -->
+    <!-- ========================================== -->
+    <div id="modalDetalleDual" class="modal-detalle-dual">
+        <div class="modal-detalle-contenido">
+            <div class="modal-detalle-header">
+                <h3><i class="fas fa-briefcase"></i> Detalle del Dual</h3>
+                <button class="close-btn" onclick="cerrarDetalleDual()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="detalleDualContent">
+                <p><i class="fas fa-spinner fa-pulse"></i> Cargando detalles...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODAL DE FIRMA POR CÓDIGO DE EMAIL        -->
+    <!-- ========================================== -->
+    <div id="modalFirma" class="modal-firma">
+        <div class="modal-firma-contenido">
+            <div class="modal-firma-header">
+                <h3><i class="fas fa-shield-alt"></i> Firmar Dual</h3>
+                <button class="close-btn" onclick="cerrarModalFirma()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-firma-body">
+
+                <!-- AVISO INICIAL -->
+                <div id="avisoInicialFirma" style="
+                    background: #eef2ff;
+                    border-left: 4px solid #6366f1;
+                    padding: 12px 15px;
+                    border-radius: 8px;
+                    margin-bottom: 20px;
+                    font-size: 0.85rem;
+                    color: #4338ca;
+                ">
+                    <i class="fas fa-info-circle"></i>
+                    Por seguridad, enviaremos un <strong>código de 6 dígitos</strong> a tu correo electrónico. Deberás ingresarlo junto con tu contraseña para firmar.
+                </div>
+
+                <!-- PASO 1: SOLICITAR CÓDIGO -->
+                <div id="paso1Codigo">
+                    <p style="color: #64748b; font-size: 0.9rem; margin-bottom: 15px;">
+                        <i class="fas fa-envelope"></i>
+                        Recibirás el código en el correo asociado a tu cuenta de maestro.
+                    </p>
+                    <button onclick="solicitarCodigoFirma()" id="btnSolicitarCodigo" style="
+                        width: 100%;
+                        padding: 14px;
+                        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+                        color: white;
+                        border: none;
+                        border-radius: 10px;
+                        font-weight: 600;
+                        font-size: 1rem;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 8px;
+                        transition: transform 0.2s, box-shadow 0.2s;
+                    ">
+                        <i class="fas fa-paper-plane"></i> Enviar código a mi correo
+                    </button>
+                </div>
+
+                <!-- PASO 2: INGRESAR CÓDIGO Y CONTRASEÑA -->
+                <div id="paso2Codigo" style="display: none;">
+                    <div style="
+                        background: #dcfce7;
+                        border-left: 4px solid #10b981;
+                        padding: 12px 15px;
+                        border-radius: 8px;
+                        margin-bottom: 20px;
+                        font-size: 0.85rem;
+                        color: #166534;
+                    ">
+                        <i class="fas fa-check-circle"></i>
+                        <span id="mensajeCodigoEnviado">Código enviado a tu correo</span>
+                    </div>
+
+                    <div style="margin-bottom: 18px;">
+                        <label for="inputCodigoFirma" style="
+                            font-size: 0.85rem;
+                            color: #475569;
+                            font-weight: 600;
+                            display: block;
+                            margin-bottom: 8px;
+                        ">
+                            <i class="fas fa-key"></i> Código de 6 dígitos
+                        </label>
+                        <input type="text" id="inputCodigoFirma" maxlength="6" placeholder="000000" autocomplete="off" style="
+                            width: 100%;
+                            padding: 16px;
+                            font-size: 1.8rem;
+                            text-align: center;
+                            letter-spacing: 10px;
+                            font-weight: 700;
+                            border: 2px solid #e2e8f0;
+                            border-radius: 12px;
+                            font-family: 'Courier New', monospace;
+                            outline: none;
+                            transition: border-color 0.2s;
+                        ">
+                    </div>
+
+                    <div style="margin-bottom: 18px;">
+                        <label for="inputPasswordFirma" style="
+                            font-size: 0.85rem;
+                            color: #475569;
+                            font-weight: 600;
+                            display: block;
+                            margin-bottom: 8px;
+                        ">
+                            <i class="fas fa-lock"></i> Tu contraseña
+                        </label>
+                        <input type="password" id="inputPasswordFirma" placeholder="Ingresa tu contraseña" style="
+                            width: 100%;
+                            padding: 14px;
+                            font-size: 1rem;
+                            border: 2px solid #e2e8f0;
+                            border-radius: 12px;
+                            outline: none;
+                            transition: border-color 0.2s;
+                        ">
+                    </div>
+
+                    <div id="mensajeCodigo" style="
+                        display: none;
+                        padding: 12px;
+                        border-radius: 8px;
+                        margin-bottom: 18px;
+                        font-size: 0.85rem;
+                    "></div>
+
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="verificarCodigoFirma()" id="btnFirmar" style="
+                            flex: 2;
+                            padding: 14px;
+                            background: linear-gradient(135deg, #10b981, #059669);
+                            color: white;
+                            border: none;
+                            border-radius: 10px;
+                            font-weight: 700;
+                            font-size: 1rem;
+                            cursor: pointer;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            gap: 8px;
+                        ">
+                            <i class="fas fa-check-circle"></i> Firmar ahora
+                        </button>
+                        <button onclick="volverPaso1Codigo()" style="
+                            flex: 1;
+                            padding: 14px;
+                            background: #f1f5f9;
+                            color: #475569;
+                            border: none;
+                            border-radius: 10px;
+                            font-weight: 600;
+                            font-size: 0.95rem;
+                            cursor: pointer;
+                        ">
+                            Cancelar
+                        </button>
+                    </div>
+
+                    <p style="
+                        text-align: center;
+                        font-size: 0.75rem;
+                        color: #94a3b8;
+                        margin-top: 15px;
+                    ">
+                        <i class="fas fa-clock"></i> El código expira en 10 minutos
+                    </p>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ✅ FORMATO IMPRIMIBLE -->
+    <div id="formatoImprimible" class="formato-imprimible">
+        <!-- Se genera dinámicamente desde JS -->
+    </div>
+
+    <script src="../../js/menu.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="../../js/duales.js?v=99"></script>
+</body>
+</html>

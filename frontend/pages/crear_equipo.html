@@ -1,0 +1,95 @@
+<!-- ============================================
+     ARCHIVO: crear_equipo.html
+     Crear nuevo equipo - Diseño profesional
+     ============================================ -->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learnify | Crear Equipo</title>
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="../css/base.css">
+    <link rel="stylesheet" href="../css/crear-equipo.css">
+    <link rel="stylesheet" href="../css/modal_editar_perfil.css">
+    <link rel="stylesheet" href="../css/temas_oscuro.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="page-crear-equipo">
+    <div class="create-container">
+
+        <!-- Tarjeta de creación -->
+        <div class="create-card">
+            <div class="create-header">
+                <div class="create-header-icon">
+                    <i class="fas fa-users"></i>
+                </div>
+                <div>
+                    <h1 id="tituloPrincipal">Crear nuevo equipo</h1>
+                    <p class="create-subtitle" id="subtituloPrincipal">Forma un equipo para colaborar en proyectos</p>
+                </div>
+            </div>
+
+            <!-- Mensaje de éxito/error -->
+            <div id="mensaje" class="message-container" style="display: none;">
+                <div class="message-content">
+                    <i class="fas fa-check-circle" id="mensajeIcon"></i>
+                    <span id="mensajeTexto"></span>
+                </div>
+            </div>
+
+            <!-- Formulario -->
+            <form id="formCrearEquipo" class="create-form">
+                
+                <div class="form-group">
+                    <label for="nombre">
+                        <i class="fas fa-tag"></i> Nombre del equipo <span class="required">*</span>
+                    </label>
+                    <input type="text" id="nombre" placeholder="Ej: Equipo de Desarrollo, Proyecto Alpha" required>
+                    <div class="form-help">
+                        <i class="fas fa-lightbulb"></i> Elige un nombre claro para identificar el equipo.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="descripcion">
+                        <i class="fas fa-align-left"></i> Descripción <span class="optional">(opcional)</span>
+                    </label>
+                    <textarea id="descripcion" placeholder="Describe el propósito y objetivos del equipo..."></textarea>
+                    <div class="form-help">
+                        <i class="fas fa-info-circle"></i> Una buena descripción ayuda a los miembros a entender el propósito del equipo.
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="cancelar()">
+                        <i class="fas fa-times"></i> Cancelar
+                    </button>
+                    <button type="submit" class="btn btn-primary" id="btnSubmit">
+                        <i class="fas fa-save"></i> <span id="btnTexto">Crear equipo</span>
+                    </button>
+                </div>
+
+            </form>
+
+            <div class="back-link">
+                <a href="mis_equipos.html"><i class="fas fa-arrow-left"></i> Volver a mis equipos</a>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ============================================ -->
+    <!-- SCRIPTS                                       -->
+    <!-- ============================================ -->
+    <script src="../js/crear-equipo.js"></script>
+</body>
+</html>

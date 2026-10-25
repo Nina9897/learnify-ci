@@ -1,0 +1,154 @@
+@startuml
+!theme plain
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam backgroundColor #F8FAFC
+skinparam class {
+    BackgroundColor white
+    BorderColor #64748B
+    FontColor #1E293B
+    FontName Arial
+    FontSize 12
+}
+
+' ============================================
+' TABLA PRINCIPAL (HECHOS)
+' ==========================================='
+class "usuarios" as usuarios {
+    + _id : ObjectId [PK]
+    --
+    nombre : string
+    email : string
+    password : string
+    rol : enum
+    fecha_registro : datetime
+    estadisticas : object
+    riesgo : object
+}
+
+' ============================================
+' TABLAS DE DIMENSIÓN (NIVEL 1)
+' ==========================================='
+class "equipos" as equipos {
+    + _id : ObjectId [PK]
+    --
+    nombre : string
+    descripcion : string
+    lider_id : ObjectId [FK]
+    fecha_creacion : datetime
+    miembros : array
+}
+
+class "tareas" as tareas {
+    + _id : ObjectId [PK]
+    --
+    titulo : string
+    descripcion : string
+    equipo_id : ObjectId [FK]
+    creador_id : ObjectId [FK]
+    fecha_limite : date
+    fecha_creacion : datetime
+    archivos_adjuntos : array
+}
+
+class "mensajes_chat" as mensajes {
+    + _id : ObjectId [PK]
+    --
+    equipo_id : ObjectId [FK]
+    usuario_id : ObjectId [FK]
+    mensaje : string
+    fecha_envio : datetime
+}
+
+class "entregas" as entregas {
+    + _id : ObjectId [PK]
+    --
+    tarea_id : ObjectId [FK]
+    alumno_id : ObjectId [FK]
+    comentario : string
+    archivo_id : ObjectId
+    nombre_archivo : string
+    calificacion : int
+    fecha_entrega : datetime
+}
+
+' ============================================
+' TABLAS DE DIMENSIÓN SECUNDARIAS (NIVEL 2)
+' ============================================
+class "actividad" as actividad {
+    + _id : ObjectId [PK]
+    --
+    usuario_id : ObjectId [FK]
+    tipo : string
+    fecha : datetime
+    ip : string
+}
+
+class "dual" as dual {
+    + _id : ObjectId [PK]
+    --
+    usuario_id : ObjectId [FK]
+    titulo : string
+    empresa : string
+    fecha_inicio : date
+    fecha_fin : date
+    horas : int
+    estado : string
+}
+
+class "estadias" as estadias {
+    + _id : ObjectId [PK]
+    --
+    usuario_id : ObjectId [FK]
+    titulo : string
+    empresa : string
+    fecha_inicio : date
+    fecha_fin : date
+    horas : int
+    ubicacion : string
+    estado : string
+}
+
+' ============================================
+' RELACIONES (FOREIGN KEYS)
+' ============================================
+usuarios ||--o{ equipos : "lidera"
+equipos ||--o{ tareas : "contiene"
+equipos ||--o{ mensajes : "tiene"
+tareas ||--o{ entregas : "recibe"
+usuarios ||--o{ entregas : "realiza"
+usuarios ||--o{ mensajes : "envía"
+usuarios ||--o{ actividad : "genera"
+usuarios ||--o{ dual : "solicita"
+usuarios ||--o{ estadias : "realiza"
+
+' ============================================
+' NOTAS EXPLICATIVAS
+' ============================================
+note right of usuarios
+  <b>Tabla de Hechos Principal</b>
+  Almacena información de todos los usuarios
+  (maestros y alumnos)
+end note
+
+note right of equipos
+  <b>Dimensión: Equipos</b>
+  Agrupa a los alumnos por clase/proyecto
+end note
+
+note bottom of tareas
+  <b>Dimensión: Tareas</b>
+  Asignadas por el líder del equipo
+end note
+
+note bottom of entregas
+  <b>Dimensión: Entregas</b>
+  Calificaciones y archivos subidos
+end note
+
+note left of dual
+  <b>Dimensión: Duales</b>
+  Prácticas profesionales
+end note
+
+@enduml

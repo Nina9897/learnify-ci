@@ -1,0 +1,43 @@
+/* ============================================
+     ARCHIVO: crear-tarea.css
+     Estilos para crear tarea - Diseño profesional
+     ============================================ */
+
+/* ============================================
+     EXCEPCIÓN: PÁGINA DE CREAR TAREA
+     ============================================ */
+body.page-crear-tarea {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-height: 100vh;
+    background: #f1f5f9;
+    padding: 20px;
+    margin: 0;
+}
+
+/* ============================================
+     FORMULARIO - SIEMPRE VISIBLE
+     ============================================ */
+.form-tarea {
+    display: block !important;
+}
+
+/* ============================================
+     INPUTS - ASEGURAR QUE SEAN INTERACTIVOS
+     ============================================ */
+.form-tarea input,
+.form-tarea textarea {
+    pointer-events: auto !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+}
+
+/* ============================================
+     RESPONSIVE EXTRA
+     ============================================ */
+@media (max-width: 480px) {
+    body.page-crear-tarea {
+        padding: 12px;
+    }
+}

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Learnify · Asignaciones</title>
+  <!-- Font Awesome 6 (free) for icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+  <link rel="stylesheet" href="css/dashboard-borrador.css">
+</head>
+<body>
+  <div class="dashboard">
+    <!-- header -->
+    <div class="main-header">
+      <h1>Asignaciones</h1>
+      <div class="welcome-note">
+        <i class="fas fa-hand-wave"></i>
+        <span>Bienvenido — aquí puedes gestionar tareas y ver productividad</span>
+      </div>
+    </div>
+
+    <!-- main grid -->
+    <div class="dashboard-grid">
+      <!-- columna izquierda (perfil + equipos) -->
+      <div class="left-panel">
+        <!-- perfil administrador -->
+        <div class="profile-card">
+          <div class="avatar">
+            <i class="fas fa-user-tie"></i>
+          </div>
+          <div class="profile-info">
+            <h3>Administrador Learnify</h3>
+            <p class="role"><i class="fas fa-briefcase"></i> Asesor</p>
+          </div>
+        </div>
+
+        <!-- panel navegación -->
+        <div class="panel-section">
+          <h4>Panel</h4>
+          <ul class="nav-list">
+            <li class="active"><i class="fas fa-chart-pie"></i> Resumen</li>
+            <li><i class="fas fa-comment-dots"></i> Charlar</li>
+          </ul>
+        </div>
+
+        <!-- equipos -->
+        <div class="teams-section">
+          <h4>Equipos</h4>
+          <div class="team-item">
+            <div class="team-color green"></div>
+            <div class="team-details">
+              <span class="team-name">Equipo Verde</span>
+              <span class="team-members">5 miembros</span>
+            </div>
+          </div>
+          <div class="team-item">
+            <div class="team-color blue"></div>
+            <div class="team-details">
+              <span class="team-name">Equipo Azul</span>
+              <span class="team-members">4 miembros</span>
+            </div>
+          </div>
+          <div class="team-item">
+            <div class="team-color red"></div>
+            <div class="team-details">
+              <span class="team-name">Equipo Rojo</span>
+              <span class="team-members">6 miembros</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- columna central (tareas) -->
+      <div class="tasks-panel">
+        <h2>Tareas</h2>
+        <div class="tasks-list">
+          <div class="task-item" data-status="completada">
+            <i class="fas fa-check-circle"></i>
+            <span class="task-name">Reporte semanal</span>
+            <span class="task-status status-completed">completada</span>
+          </div>
+          <div class="task-item" data-status="fallida">
+            <i class="fas fa-times-circle"></i>
+            <span class="task-name">Validar entregas</span>
+            <span class="task-status status-failed">fallida</span>
+          </div>
+          <div class="task-item" data-status="pendiente">
+            <i class="fas fa-hourglass-half"></i>
+            <span class="task-name">Revisar inventario</span>
+            <span class="task-status status-pending">pendiente</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- columna derecha (kpi widgets) -->
+      <div class="right-panel">
+        <!-- widget app movil -->
+        <div class="widget app-widget">
+          <h4>Aplicación móvil</h4>
+          <div class="progress-circle" data-progress="96">
+            <div class="progress-inner">
+              <span class="percentage">96%</span>
+            </div>
+          </div>
+          <p class="widget-footer">12 tareas</p>
+        </div>
+
+        <!-- widget ui kit -->
+        <div classwidget ui-kit-widget">
+          <h4>Kit de interfaz de usuario de marca</h4>
+          <div class="task-badge">22 tareas</div>
+        </div>
+
+        <!-- nota con porcentajes duales -->
+        <div class="note-widget">
+          <p class="note-label">Nota:</p>
+          <div class="dual-percent">
+            <span class="big-percent">73%</span>
+            <span class="big-percent">46%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+  
+</body>
+</html>

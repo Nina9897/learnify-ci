@@ -1,0 +1,55 @@
+// ============================================
+// ARCHIVO: autenticacion.js
+// ============================================
+
+// ============================================
+// REGISTRO DE USUARIOS
+// ============================================
+document.addEventListener('DOMContentLoaded', function() {
+    const formularioRegistro = document.getElementById('formulario-registro');
+    
+    if (formularioRegistro) {
+        formularioRegistro.addEventListener('submit', async function(evento) {
+            evento.preventDefault();
+            
+            const mensajeDiv = document.getElementById('mensaje');
+            mensajeDiv.className = 'mensaje';
+            mensajeDiv.textContent = 'Registrando...';
+            mensajeDiv.style.display = 'block';
+            
+            // Recoger datos del formulario
+            const datos = {
+                nombre: document.getElementById('nombre').value,
+                email: document.getElementById('email').value,
+                password: document.getElementById('password').value,
+                rol: document.getElementById('rol').value
+            };
+            
+            try {
+                const respuesta = await fetch('/api/registro', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(datos)
+                });
+                
+                const resultado = await respuesta.json();
+                
+                if (resultado.exito) {
+                    mensajeDiv.className = 'mensaje exito';
+                    mensajeDiv.textContent = '¡Registro exitoso! Redirigiendo...';
+                    
+                    setTimeout(() => {
+                        window.location.href = 'iniciar-sesion.html';
+                    }, 2000);
+                } else {
+                    mensajeDiv.className = 'mensaje error';
+                    mensajeDiv.textContent = 'Error conexión' + resultado.mensaje;
+                }
+                
+            } catch (error) {
+                mensajeDiv.className = 'mensaje error';
+                mensajeDiv.textContent = 'Error de conexión';
+            }
+        });
+    }
+});
